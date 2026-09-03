@@ -53,6 +53,25 @@ class FlashcardItemSchema(BaseModel):
 class FlashcardGenerationOutput(BaseModel):
     flashcards: List[FlashcardItemSchema]
 
+class MindMapNodeSchema(BaseModel):
+    id: str = Field(description="Unique node identifier")
+    label: str = Field(description="Concept or subtopic title")
+    details: Optional[str] = Field(None, description="Short 1-sentence explanation")
+    children: Optional[List['MindMapNodeSchema']] = Field(default_factory=list, description="Subtopic children")
+
+class StudyNoteItemSchema(BaseModel):
+    concept_name: str = Field(description="Target concept name")
+    title: str = Field(description="Engaging title for the study module")
+    summary: str = Field(description="High-level 2-3 sentence conceptual executive summary")
+    key_takeaways: List[str] = Field(description="3-5 bullet points of core principles")
+    formulae_or_rules: List[str] = Field(description="Key equations, syntax, or theoretical rules")
+    common_pitfalls: List[str] = Field(description="2-3 common misconceptions or exam traps")
+    markdown_content: str = Field(description="Rich markdown formatted structured study notes with code blocks/examples if applicable")
+    mind_map_tree: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Hierarchical mind-map tree with root and child branches")
+
+class StudyNotesGenerationOutput(BaseModel):
+    notes: List[StudyNoteItemSchema]
+
 
 # --- OOP Provider Abstraction ---
 
@@ -176,6 +195,48 @@ class GeminiProvider(AIProvider):
         raw_res = response.text
         data = json.loads(raw_res)
         return data.get("flashcards", [])
+
+    async def generate_study_notes(self, concepts: List[Dict[str, Any]], depth: str = "comprehensive", context_chunks: List[str] = None) -> List[Dict[str, Any]]:
+        concepts_block = "\n".join([
+            f"- Concept: {c['name']}\n"
+            f"  Description: {c.get('description', '')}\n"
+            f"  Difficulty: {c.get('difficulty', 'basic')}\n"
+            f"  Prerequisites: {', '.join(c.get('prerequisites', []))}"
+            for c in concepts
+        ])
+        
+        context_block = ""
+        if context_chunks:
+            context_block = "\n\nSource Material Context:\n" + "\n---\n".join(context_chunks[:8])
+
+        prompt = (
+            "You are MK-Path's master educational synthesizer and mind-map architect. "
+            f"Generate structured, high-yield study notes with a visual hierarchical mind-map tree for each of these concepts:\n\n{concepts_block}{context_block}\n\n"
+            "For each concept, produce:\n"
+            "- concept_name: The exact concept name\n"
+            "- title: Engaging title for this learning module\n"
+            "- summary: A crisp 2-3 sentence conceptual executive summary\n"
+            "- key_takeaways: 3-5 high-yield bullet principles\n"
+            "- formulae_or_rules: Key mathematical formulas, code patterns, or theoretical axioms\n"
+            "- common_pitfalls: 2-3 student misconceptions or exam traps\n"
+            "- markdown_content: Beautifully formatted Markdown notes with subheadings, explanations, and practical illustrations\n"
+            "- mind_map_tree: A recursive JSON tree where root is {'id': 'root', 'label': concept_name, 'children': [{'id': 'c1', 'label': 'Branch Title', 'details': 'summary', 'children': [...]}]}"
+        )
+
+        response = await asyncio.to_thread(
+            self.client.models.generate_content,
+            model=self.model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=StudyNotesGenerationOutput,
+                temperature=0.2
+            )
+        )
+        
+        raw_res = response.text
+        data = json.loads(raw_res)
+        return data.get("notes", [])
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         response = await asyncio.to_thread(
@@ -357,6 +418,59 @@ class GroqProvider(AIProvider):
         else:
             raise Exception(f"Groq Flashcard API error: {response.status_code} - {response.text}")
 
+    async def generate_study_notes(self, concepts: List[Dict[str, Any]], depth: str = "comprehensive", context_chunks: List[str] = None) -> List[Dict[str, Any]]:
+        concepts_block = "\n".join([
+            f"- Concept: {c['name']}\n"
+            f"  Description: {c.get('description', '')}\n"
+            f"  Difficulty: {c.get('difficulty', 'basic')}\n"
+            f"  Prerequisites: {', '.join(c.get('prerequisites', []))}"
+            for c in concepts
+        ])
+        
+        context_block = ""
+        if context_chunks:
+            context_block = "\n\nSource Context:\n" + "\n---\n".join(context_chunks[:6])
+
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are MK-Path's master educational synthesizer. "
+                        "Return your output strictly as a JSON object matching this structure: "
+                        '{"notes": [{"concept_name": "name", "title": "Module Title", "summary": "2-sentence summary", "key_takeaways": ["point 1", "point 2"], "formulae_or_rules": ["rule 1"], "common_pitfalls": ["trap 1"], "markdown_content": "# Detailed Notes...", "mind_map_tree": {"id": "root", "label": "Concept", "children": [{"id": "c1", "label": "Subtopic", "details": "desc", "children": []}]}}]}.'
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Generate structured study notes and mind-map trees for:\n{concepts_block}{context_block}"
+                }
+            ]
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        response = await asyncio.to_thread(
+            requests.post,
+            "https://api.groq.com/openai/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=25
+        )
+
+        if response.status_code == 200:
+            res_json = response.json()
+            content = res_json["choices"][0]["message"]["content"]
+            data = json.loads(content)
+            return data.get("notes", [])
+        else:
+            raise Exception(f"Groq Study Notes API error: {response.status_code} - {response.text}")
+
 
 class LocalFallbackProvider(AIProvider):
     async def extract_concepts_and_relationships(self, text: str) -> Dict[str, Any]:
@@ -366,7 +480,6 @@ class LocalFallbackProvider(AIProvider):
         return []
 
     async def generate_flashcards(self, concepts: List[Dict[str, Any]], cards_per_concept: int = 2, context_chunks: List[str] = None) -> List[Dict[str, Any]]:
-        # Deterministic card generation fallback based on concept name & description
         cards = []
         for c in concepts:
             cards.append({
@@ -376,15 +489,50 @@ class LocalFallbackProvider(AIProvider):
                 "card_type": "standard",
                 "difficulty": c.get("difficulty", "basic")
             })
-            if c.get("prerequisites"):
-                cards.append({
-                    "concept_name": c["name"],
-                    "front": f"What foundational concepts are required before studying {c['name']}?",
-                    "back": f"Prerequisites: {', '.join(c['prerequisites'])}.",
-                    "card_type": "standard",
-                    "difficulty": "intermediate"
-                })
         return cards
+
+    async def generate_study_notes(self, concepts: List[Dict[str, Any]], depth: str = "comprehensive", context_chunks: List[str] = None) -> List[Dict[str, Any]]:
+        notes = []
+        for c in concepts:
+            name = c["name"]
+            desc = c.get("description", f"Core educational concept: {name}")
+            notes.append({
+                "concept_name": name,
+                "title": f"Comprehensive Master Notes: {name}",
+                "summary": desc,
+                "key_takeaways": [
+                    f"Understanding foundational properties of {name}",
+                    f"Applying {name} in real-world scenarios",
+                    f"Connecting {name} with related prerequisite concepts"
+                ],
+                "formulae_or_rules": [
+                    f"Rule 1: Always verify assumptions before applying {name}."
+                ],
+                "common_pitfalls": [
+                    f"Confusing {name} with adjacent high-level primitives."
+                ],
+                "markdown_content": f"# {name}\n\n## Overview\n{desc}\n\n## Core Principles\n- Applied systematically across the curriculum.\n- Requires understanding of prerequisites: {', '.join(c.get('prerequisites', [])) or 'None'}.",
+                "mind_map_tree": {
+                    "id": "root",
+                    "label": name,
+                    "details": desc,
+                    "children": [
+                        {
+                            "id": "branch_1",
+                            "label": "Core Definition",
+                            "details": desc,
+                            "children": []
+                        },
+                        {
+                            "id": "branch_2",
+                            "label": "Prerequisites & Dependencies",
+                            "details": f"Prerequisites: {', '.join(c.get('prerequisites', [])) or 'None'}",
+                            "children": []
+                        }
+                    ]
+                }
+            })
+        return notes
 
 
 # --- Routing Service Orchestration Layer ---
@@ -745,6 +893,115 @@ class AIService:
             return cards
         except Exception as e:
             logger.error(f"Local flashcard generation fallback failed catastrophically: {e}")
+            return []
+
+    @classmethod
+    async def generate_study_notes(cls, concepts: List[Dict[str, Any]], depth: str = "comprehensive", context_chunks: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Generates structured study notes and hierarchical mind-map trees for concepts.
+        Cycles through Gemini -> Groq -> Local Fallback.
+        """
+        gemini_keys = settings.GEMINI_API_KEYS
+        gemini_model = settings.GEMINI_MODEL or "gemini-3.5-flash"
+        
+        # Stage 1: Gemini
+        if gemini_keys:
+            for idx, key in enumerate(gemini_keys):
+                start_time = time.perf_counter()
+                provider = "Gemini"
+                model_name = gemini_model
+                success = False
+                error_category = "None"
+                
+                try:
+                    provider_obj = GeminiProvider(api_key=key, model_name=model_name)
+                    notes = await provider_obj.generate_study_notes(concepts, depth, context_chunks)
+                    success = True
+                    
+                    cls._log_observability(
+                        operation="generate_study_notes",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=False,
+                        error_category=error_category
+                    )
+                    return notes
+                except Exception as e:
+                    success = False
+                    error_category = cls._categorize_error(e)
+                    cls._log_observability(
+                        operation="generate_study_notes",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=True,
+                        error_category=error_category
+                    )
+                    logger.error(f"Gemini Study Notes generation failed (Key {idx+1}/{len(gemini_keys)}): {e}")
+
+        # Stage 2: Groq Fallback
+        if settings.GROQ_API_KEY:
+            start_time = time.perf_counter()
+            provider = "Groq"
+            model_name = "openai/gpt-oss-120b"
+            success = False
+            error_category = "None"
+            
+            try:
+                provider_obj = GroqProvider(api_key=settings.GROQ_API_KEY)
+                notes = await provider_obj.generate_study_notes(concepts, depth, context_chunks)
+                success = True
+                
+                cls._log_observability(
+                    operation="generate_study_notes",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                return notes
+            except Exception as e:
+                success = False
+                error_category = cls._categorize_error(e)
+                cls._log_observability(
+                    operation="generate_study_notes",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                logger.error(f"Groq study notes fallback failed: {e}")
+
+        # Stage 3: Local Fallback
+        start_time = time.perf_counter()
+        provider = "Local"
+        model_name = "RuleBasedStudyNotes"
+        success = True
+        error_category = "None"
+        
+        try:
+            provider_obj = LocalFallbackProvider()
+            notes = await provider_obj.generate_study_notes(concepts, depth, context_chunks)
+            
+            cls._log_observability(
+                operation="generate_study_notes",
+                provider=provider,
+                model=model_name,
+                success=success,
+                latency=time.perf_counter() - start_time,
+                fallback_used=True,
+                error_category=error_category
+            )
+            return notes
+        except Exception as e:
+            logger.error(f"Local study notes fallback failed: {e}")
             return []
 
     @classmethod

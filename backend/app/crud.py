@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from .models import (
     UserProfile, Material, Concept, Relationship, Question, Attempt, 
     Mastery, StudyPath, Resource, Gamification, LearnerEvent, ResourceFeedback, 
-    MaterialChunk, UserActivity, Flashcard
+    MaterialChunk, UserActivity, Flashcard, StudyNote
 )
 import math
 from .database import DatabaseManager
@@ -52,6 +52,7 @@ _DEMO_DB: Dict[str, List[Dict[str, Any]]] = {
     "material_chunks": [],
     "user_activity": [],
     "flashcards": [],
+    "study_notes": [],
     "gamification": [
         {
             "_id": ObjectId("64e8cf65f5a65c4dbf000002"),
@@ -1072,4 +1073,79 @@ async def get_due_flashcards(db, clerk_user_id: str, limit: int = 50) -> List[Di
     ]
     results.sort(key=lambda x: x.get("next_review_at", now))
     return serialize_docs(results[:limit])
+
+
+# --- Study Notes & Mind-Maps CRUD ---
+
+async def create_study_notes(db, notes: List[StudyNote]) -> List[Dict[str, Any]]:
+    """Persist generated study notes with mind-maps."""
+    docs = [n.model_dump() for n in notes]
+    for d in docs:
+        d["created_at"] = datetime.utcnow()
+        d["updated_at"] = datetime.utcnow()
+        
+    if db.is_online:
+        col = db.get_collection("study_notes")
+        res = await col.insert_many(docs)
+        for d, inserted_id in zip(docs, res.inserted_ids):
+            d["_id"] = inserted_id
+        return serialize_docs(docs)
+        
+    for d in docs:
+        d["_id"] = ObjectId()
+        _DEMO_DB["study_notes"].append(d)
+    return serialize_docs(docs)
+
+async def get_study_notes(db, clerk_user_id: str, concept_id: Optional[str] = None, material_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve user study notes with optional concept or material filtering."""
+    if db.is_online:
+        col = db.get_collection("study_notes")
+        query: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+        if concept_id:
+            query["concept_id"] = concept_id
+        if material_id:
+            query["material_id"] = material_id
+        cursor = col.find(query).sort("created_at", -1)
+        notes = await cursor.to_list(length=200)
+        return serialize_docs(notes)
+        
+    results = [
+        d for d in _DEMO_DB.get("study_notes", [])
+        if d.get("clerk_user_id") == clerk_user_id
+        and (not concept_id or d.get("concept_id") == concept_id)
+        and (not material_id or d.get("material_id") == material_id)
+    ]
+    results.sort(key=lambda x: x.get("created_at", datetime.min), reverse=True)
+    return serialize_docs(results)
+
+async def get_study_note(db, note_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single study note by ID."""
+    if db.is_online:
+        col = db.get_collection("study_notes")
+        try:
+            doc = await col.find_one({"_id": ObjectId(note_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+            
+    for d in _DEMO_DB.get("study_notes", []):
+        if str(d.get("_id")) == note_id and d.get("clerk_user_id") == clerk_user_id:
+            return serialize_doc(d)
+    return None
+
+async def delete_study_note(db, note_id: str, clerk_user_id: str) -> bool:
+    """Delete a study note by ID."""
+    if db.is_online:
+        col = db.get_collection("study_notes")
+        try:
+            res = await col.delete_one({"_id": ObjectId(note_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+            
+    notes = _DEMO_DB.get("study_notes", [])
+    before_len = len(notes)
+    _DEMO_DB["study_notes"] = [n for n in notes if not (str(n.get("_id")) == note_id and n.get("clerk_user_id") == clerk_user_id)]
+    return len(_DEMO_DB["study_notes"]) < before_len
+
 

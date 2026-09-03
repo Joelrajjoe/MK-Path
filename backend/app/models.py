@@ -306,3 +306,34 @@ class GenerateFlashcardsRequest(BaseModel):
     material_id: Optional[str] = None
     cards_per_concept: int = Field(2, ge=1, le=10)
     include_scenarios: bool = Field(True)
+
+
+class MindMapNode(BaseModel):
+    id: str
+    label: str
+    details: Optional[str] = None
+    children: Optional[List['MindMapNode']] = Field(default_factory=list)
+
+
+class StudyNote(BaseModel):
+    """Structured hierarchical study notes and mind-map trees for concepts/materials."""
+    clerk_user_id: str
+    concept_id: Optional[str] = None
+    concept_name: str
+    material_id: Optional[str] = None
+    title: str
+    summary: str
+    key_takeaways: List[str] = Field(default_factory=list)
+    formulae_or_rules: List[str] = Field(default_factory=list)
+    common_pitfalls: List[str] = Field(default_factory=list)
+    mind_map_tree: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    markdown_content: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GenerateStudyNotesRequest(BaseModel):
+    concept_ids: Optional[List[str]] = Field(default_factory=list)
+    material_id: Optional[str] = None
+    depth: str = Field("comprehensive", description="concise or comprehensive")
+

@@ -15,7 +15,7 @@ from .models import (
     UserProfile, Material, Concept, Relationship, Question, Attempt, 
     Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, 
     Assignment, AssignmentQuestion, ResourceFeedback, Flashcard, 
-    FlashcardReviewRequest, GenerateFlashcardsRequest
+    FlashcardReviewRequest, GenerateFlashcardsRequest, StudyNote, GenerateStudyNotesRequest
 )
 from .services.ai import AIService
 from .services.extractors import (
@@ -2620,6 +2620,151 @@ async def get_curriculum_export_report(
             for m in materials
         ]
     }
+
+
+# ─── Study Notes & Hierarchical Mind-Map API ──────────────────────────────────
+
+@app.get("/api/study-notes")
+async def get_study_notes(
+    concept_id: Optional[str] = None,
+    material_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve all synthesized study notes and visual mind-maps for the learner."""
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        notes = await crud.get_study_notes(db, clerk_id, concept_id, material_id)
+        return notes
+    except Exception as e:
+        logger.error(f"Error fetching study notes: {e}")
+        return []
+
+@app.get("/api/study-notes/{note_id}")
+async def get_study_note(
+    note_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve a single study note and mind-map by ID."""
+    clerk_id = current_user["clerk_user_id"]
+    note = await crud.get_study_note(db, note_id, clerk_id)
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Study note not found."
+        )
+    return note
+
+@app.post("/api/study-notes/generate")
+async def generate_study_notes(
+    req: GenerateStudyNotesRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Generate structured study notes and visual mind-map trees for concepts."""
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Resolve Target Concepts
+    all_concepts = await crud.get_concepts(db, clerk_id)
+    if not all_concepts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No concepts found. Please upload materials and extract concepts first."
+        )
+        
+    target_concepts = all_concepts
+    if req.concept_ids:
+        id_set = set(req.concept_ids)
+        target_concepts = [c for c in all_concepts if str(c["_id"]) in id_set or c.get("name") in id_set]
+    elif req.material_id:
+        target_concepts = [c for c in all_concepts if str(c.get("material_id")) == req.material_id]
+        
+    if not target_concepts:
+        target_concepts = all_concepts[:4]
+        
+    # 2. Retrieve context chunks
+    context_chunks = []
+    if req.material_id:
+        chunks = await crud.get_material_chunks(db, req.material_id)
+        context_chunks = [c.get("text", "") for c in chunks if c.get("text")]
+        
+    # 3. Call AI Service
+    try:
+        raw_notes = await AIService.generate_study_notes(
+            concepts=target_concepts,
+            depth=req.depth,
+            context_chunks=context_chunks
+        )
+    except Exception as e:
+        logger.error(f"Error generating study notes with AI: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service failed to synthesize study notes."
+        )
+
+    # 4. Map to StudyNote model instances
+    name_to_concept = {c["name"]: c for c in target_concepts}
+    default_concept = target_concepts[0]
+    
+    note_models: List[StudyNote] = []
+    for item in raw_notes:
+        matched_concept = name_to_concept.get(item.get("concept_name"), default_concept)
+        concept_id_str = str(matched_concept["_id"]) if "_id" in matched_concept else matched_concept.get("id")
+        material_id_str = str(matched_concept.get("material_id", "")) if matched_concept.get("material_id") else None
+        
+        note_models.append(
+            StudyNote(
+                clerk_user_id=clerk_id,
+                concept_id=concept_id_str,
+                concept_name=matched_concept["name"],
+                material_id=material_id_str,
+                title=item.get("title", f"Study Note: {matched_concept['name']}"),
+                summary=item.get("summary", matched_concept.get("description", "")),
+                key_takeaways=item.get("key_takeaways", []),
+                formulae_or_rules=item.get("formulae_or_rules", []),
+                common_pitfalls=item.get("common_pitfalls", []),
+                mind_map_tree=item.get("mind_map_tree", {}),
+                markdown_content=item.get("markdown_content", "")
+            )
+        )
+        
+    # 5. Persist to database
+    saved_notes = await crud.create_study_notes(db, note_models)
+    
+    # 6. Award Gamification XP (15 XP for synthesizing study notes)
+    try:
+        await GamificationService.award_xp(
+            db=db,
+            clerk_user_id=clerk_id,
+            action="synthesis",
+            metadata={"notes_count": len(saved_notes)}
+        )
+    except Exception as e:
+        logger.warning(f"XP award for study notes synthesis failed: {e}")
+        
+    return {
+        "success": True,
+        "count": len(saved_notes),
+        "notes": saved_notes
+    }
+
+@app.delete("/api/study-notes/{note_id}")
+async def delete_study_note(
+    note_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete an individual study note and mind-map."""
+    clerk_id = current_user["clerk_user_id"]
+    deleted = await crud.delete_study_note(db, note_id, clerk_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Study note not found or not owned by user."
+        )
+    return {"success": True, "deleted_id": note_id}
+
 
 
 
