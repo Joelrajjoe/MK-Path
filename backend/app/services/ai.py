@@ -53,11 +53,22 @@ class FlashcardItemSchema(BaseModel):
 class FlashcardGenerationOutput(BaseModel):
     flashcards: List[FlashcardItemSchema]
 
-class MindMapNodeSchema(BaseModel):
-    id: str = Field(description="Unique node identifier")
-    label: str = Field(description="Concept or subtopic title")
-    details: Optional[str] = Field(None, description="Short 1-sentence explanation")
-    children: Optional[List['MindMapNodeSchema']] = Field(default_factory=list, description="Subtopic children")
+class MindMapSubChildSchema(BaseModel):
+    id: str = Field(description="Unique leaf identifier e.g. leaf_1")
+    label: str = Field(description="Subtopic or property title")
+    details: Optional[str] = Field(None, description="Short 1-sentence note")
+
+class MindMapBranchSchema(BaseModel):
+    id: str = Field(description="Unique branch identifier e.g. branch_1")
+    label: str = Field(description="Branch or section category title")
+    details: Optional[str] = Field(None, description="Short summary of this branch")
+    children: List[MindMapSubChildSchema] = Field(default_factory=list, description="Sub-elements of this branch")
+
+class MindMapRootSchema(BaseModel):
+    id: str = Field(default="root", description="Root identifier")
+    label: str = Field(description="Concept name as root title")
+    details: Optional[str] = Field(None, description="Overview note")
+    children: List[MindMapBranchSchema] = Field(default_factory=list, description="Top-level subtopics and branches")
 
 class StudyNoteItemSchema(BaseModel):
     concept_name: str = Field(description="Target concept name")
@@ -67,7 +78,7 @@ class StudyNoteItemSchema(BaseModel):
     formulae_or_rules: List[str] = Field(description="Key equations, syntax, or theoretical rules")
     common_pitfalls: List[str] = Field(description="2-3 common misconceptions or exam traps")
     markdown_content: str = Field(description="Rich markdown formatted structured study notes with code blocks/examples if applicable")
-    mind_map_tree: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Hierarchical mind-map tree with root and child branches")
+    mind_map_tree: MindMapRootSchema = Field(description="Hierarchical mind-map tree with root, branches and child leaves")
 
 class StudyNotesGenerationOutput(BaseModel):
     notes: List[StudyNoteItemSchema]

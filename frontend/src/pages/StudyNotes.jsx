@@ -474,13 +474,48 @@ export default function StudyNotes() {
                     </div>
 
                     <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 max-h-[600px] overflow-y-auto">
-                      {selectedNote.mind_map_tree && selectedNote.mind_map_tree.label ? (
-                        <MindMapTreeNode node={selectedNote.mind_map_tree} />
-                      ) : (
-                        <div className="p-8 text-center text-slate-500 text-xs">
-                          Mind-map tree representation unavailable for this module.
-                        </div>
-                      )}
+                      {(() => {
+                        const tree = (selectedNote.mind_map_tree && selectedNote.mind_map_tree.label) 
+                          ? selectedNote.mind_map_tree 
+                          : {
+                              id: 'root',
+                              label: selectedNote.concept_name || 'Concept Overview',
+                              details: selectedNote.summary,
+                              children: [
+                                {
+                                  id: 'branch_takeaways',
+                                  label: 'Core Principles & Key Takeaways',
+                                  details: `${selectedNote.key_takeaways?.length || 0} critical takeaways`,
+                                  children: (selectedNote.key_takeaways || []).map((t, idx) => ({
+                                    id: `t_${idx}`,
+                                    label: t,
+                                    details: ''
+                                  }))
+                                },
+                                {
+                                  id: 'branch_rules',
+                                  label: 'Core Axioms & Rules',
+                                  details: `${selectedNote.formulae_or_rules?.length || 0} rules & equations`,
+                                  children: (selectedNote.formulae_or_rules || []).map((r, idx) => ({
+                                    id: `r_${idx}`,
+                                    label: r,
+                                    details: ''
+                                  }))
+                                },
+                                {
+                                  id: 'branch_traps',
+                                  label: 'Common Misconceptions & Exam Traps',
+                                  details: `${selectedNote.common_pitfalls?.length || 0} pitfall warnings`,
+                                  children: (selectedNote.common_pitfalls || []).map((p, idx) => ({
+                                    id: `p_${idx}`,
+                                    label: p,
+                                    details: ''
+                                  }))
+                                }
+                              ].filter(b => b.children.length > 0)
+                            }
+                        return <MindMapTreeNode node={tree} />
+                      })()}
                     </div>
                   </div>
                 )}

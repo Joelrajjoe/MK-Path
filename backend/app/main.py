@@ -2713,6 +2713,44 @@ async def generate_study_notes(
         concept_id_str = str(matched_concept["_id"]) if "_id" in matched_concept else matched_concept.get("id")
         material_id_str = str(matched_concept.get("material_id", "")) if matched_concept.get("material_id") else None
         
+        # Guarantee mind_map_tree structure
+        tree = item.get("mind_map_tree") or {}
+        if not tree or not tree.get("label"):
+            tree = {
+                "id": "root",
+                "label": matched_concept["name"],
+                "details": item.get("summary", matched_concept.get("description", "")),
+                "children": [
+                    {
+                        "id": "branch_takeaways",
+                        "label": "Core Principles & Takeaways",
+                        "details": "Key conceptual pillars",
+                        "children": [
+                            {"id": f"leaf_t_{i}", "label": t, "details": ""}
+                            for i, t in enumerate(item.get("key_takeaways", [])[:4])
+                        ]
+                    },
+                    {
+                        "id": "branch_rules",
+                        "label": "Axioms & Rules",
+                        "details": "Formulae, syntax, or theoretical laws",
+                        "children": [
+                            {"id": f"leaf_r_{i}", "label": r, "details": ""}
+                            for i, r in enumerate(item.get("formulae_or_rules", [])[:3])
+                        ]
+                    },
+                    {
+                        "id": "branch_traps",
+                        "label": "Exam Traps & Pitfalls",
+                        "details": "Frequent misconceptions",
+                        "children": [
+                            {"id": f"leaf_p_{i}", "label": p, "details": ""}
+                            for i, p in enumerate(item.get("common_pitfalls", [])[:3])
+                        ]
+                    }
+                ]
+            }
+
         note_models.append(
             StudyNote(
                 clerk_user_id=clerk_id,
@@ -2724,7 +2762,7 @@ async def generate_study_notes(
                 key_takeaways=item.get("key_takeaways", []),
                 formulae_or_rules=item.get("formulae_or_rules", []),
                 common_pitfalls=item.get("common_pitfalls", []),
-                mind_map_tree=item.get("mind_map_tree", {}),
+                mind_map_tree=tree,
                 markdown_content=item.get("markdown_content", "")
             )
         )
