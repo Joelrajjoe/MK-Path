@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@clerk/react'
 import { 
   ReactFlow, 
@@ -17,11 +18,13 @@ import {
   Activity, 
   Layers, 
   X, 
-  Loader2 
+  Loader2,
+  Download
 } from 'lucide-react'
 
 export default function KnowledgeGraph() {
   const { getToken } = useAuth()
+  const navigate = useNavigate()
   
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
@@ -79,13 +82,22 @@ export default function KnowledgeGraph() {
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Unified Knowledge Graph</h2>
             <p className="text-xs text-slate-500 mt-0.5">Visual representation of extracted concepts, prerequisites, and mastery progression.</p>
           </div>
-          <button 
-            onClick={fetchGraph}
-            className="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition"
-          >
-            {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            <span>Refresh Graph</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => navigate('/export')}
+              className="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-bold text-indigo-300 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 rounded-lg transition cursor-pointer"
+            >
+              <Download size={12} />
+              <span>Export Studio</span>
+            </button>
+            <button 
+              onClick={fetchGraph}
+              className="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition cursor-pointer"
+            >
+              {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+              <span>Refresh Graph</span>
+            </button>
+          </div>
         </div>
 
         {/* Graph Canvas Panel */}

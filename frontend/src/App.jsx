@@ -19,6 +19,7 @@ import Profile from './pages/Profile'
 import Settings from './pages/Settings'
 import AccessibilityPage from './pages/AccessibilityPage'
 import Search from './pages/Search'
+import ExportStudio from './pages/ExportStudio'
 import NotFound from './pages/NotFound'
 
 export default function App() {
@@ -43,6 +44,7 @@ export default function App() {
             <Route path="progress" element={<Progress />} />
             <Route path="achievements" element={<Achievements />} />
             <Route path="assignments" element={<Assignments />} />
+            <Route path="export" element={<ExportStudio />} />
             <Route path="profile" element={<Profile />} />
             <Route path="settings" element={<Settings />} />
             <Route path="accessibility" element={<AccessibilityPage />} />

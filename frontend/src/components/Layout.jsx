@@ -19,7 +19,8 @@ import {
   Trophy,
   ClipboardList,
   User,
-  Layers
+  Layers,
+  Download
 } from 'lucide-react'
 
 export default function Layout() {
@@ -65,6 +66,7 @@ export default function Layout() {
       case '/progress': return 'Learning Progress'
       case '/achievements': return 'Achievements & Badges'
       case '/assignments': return 'Assignments'
+      case '/export': return 'Export & Reporting Studio'
       case '/profile': return 'Learner Profile'
       case '/settings': return 'Settings'
       case '/accessibility': return 'Accessibility & Voice Tools'
@@ -81,6 +83,7 @@ export default function Layout() {
     { to: '/assessment', label: 'Assessment', icon: <GraduationCap size={18} /> },
     { to: '/study-path', label: 'Study Path', icon: <Compass size={18} /> },
     { to: '/assignments', label: 'Assignments', icon: <ClipboardList size={18} /> },
+    { to: '/export', label: 'Export Studio', icon: <Download size={18} /> },
     { to: '/resources', label: 'Resources', icon: <Sparkles size={18} /> },
     { to: '/progress', label: 'Progress', icon: <Award size={18} /> }
   ]

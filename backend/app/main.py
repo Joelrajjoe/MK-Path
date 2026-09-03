@@ -2523,4 +2523,104 @@ async def delete_flashcard(
     return {"success": True, "deleted_id": card_id}
 
 
+# ─── Export Studio & Comprehensive Report API ─────────────────────────────────
+
+@app.get("/api/export/curriculum-report")
+async def get_curriculum_export_report(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Compile a complete structured curriculum audit, concept hierarchy cheat-sheet,
+    mastery analytics, and knowledge graph dataset ready for export or client-side print/PDF.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Fetch user records
+    user_profile = await crud.get_user_profile(db, clerk_id) or {}
+    concepts = await crud.get_concepts(db, clerk_id)
+    relationships = await crud.get_relationships(db, clerk_id)
+    mastery_records = await crud.get_mastery_records(db, clerk_id)
+    materials = await crud.get_materials(db, clerk_id)
+    flashcards = await crud.get_flashcards(db, clerk_id)
+    gamification = await crud.get_gamification(db, clerk_id) or {}
+
+    # 2. Compute Analytics
+    mastery_map = {m["concept_id"]: m for m in mastery_records}
+    name_to_id = {c["name"]: str(c["_id"]) for c in concepts}
+    
+    enriched_concepts = []
+    category_counts = {"weak": 0, "learning": 0, "proficient": 0, "mastered": 0, "unassessed": 0}
+    
+    for c in concepts:
+        cid = str(c["_id"])
+        m_data = mastery_map.get(cid, {})
+        score = m_data.get("mastery_score")
+        category = m_data.get("category", "unassessed")
+        category_counts[category] = category_counts.get(category, 0) + 1
+        
+        # Ingoing/Outgoing edges
+        prereqs = [r["source_concept_name"] for r in relationships if r.get("target_concept_name") == c["name"]]
+        dependents = [r["target_concept_name"] for r in relationships if r.get("source_concept_name") == c["name"]]
+        
+        enriched_concepts.append({
+            "id": cid,
+            "name": c["name"],
+            "description": c.get("description", ""),
+            "difficulty": c.get("difficulty", "basic"),
+            "exam_relevance": c.get("exam_relevance", 80),
+            "industry_relevance": c.get("industry_relevance", 80),
+            "mastery_score": round(score, 1) if score is not None else None,
+            "mastery_category": category,
+            "prerequisites": prereqs or c.get("prerequisites", []),
+            "dependents": dependents,
+            "decayed_mastery": round(m_data.get("decayed_mastery", score), 1) if score is not None else None,
+            "last_assessed_at": m_data.get("last_assessed_at")
+        })
+
+    # Overall Metrics
+    assessed_scores = [c["mastery_score"] for c in enriched_concepts if c["mastery_score"] is not None]
+    avg_mastery = sum(assessed_scores) / len(assessed_scores) if assessed_scores else 0.0
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "learner": {
+            "display_name": user_profile.get("display_name", "MK-Path Learner"),
+            "email": user_profile.get("email", ""),
+            "xp": gamification.get("xp", 0),
+            "level": gamification.get("level", 1),
+            "level_name": gamification.get("level_name", "Beginner"),
+            "achievements_count": len(gamification.get("achievements", []))
+        },
+        "summary": {
+            "total_concepts": len(concepts),
+            "total_relationships": len(relationships),
+            "total_materials": len(materials),
+            "total_flashcards": len(flashcards),
+            "average_mastery": round(avg_mastery, 1),
+            "category_distribution": category_counts
+        },
+        "concepts": enriched_concepts,
+        "relationships": [
+            {
+                "source": r["source_concept_name"],
+                "target": r["target_concept_name"],
+                "type": r.get("relationship_type", "prerequisite_of"),
+                "origin": r.get("relationship_origin", "explicit")
+            }
+            for r in relationships
+        ],
+        "materials": [
+            {
+                "title": m["title"],
+                "file_name": m["file_name"],
+                "content_type": m.get("content_type", "application/pdf"),
+                "created_at": m.get("created_at")
+            }
+            for m in materials
+        ]
+    }
+
+
+
 
