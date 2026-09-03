@@ -109,9 +109,8 @@ class GeminiProvider(AIProvider):
         prompt = (
             "You are MK-Path's grounded learning assistant. "
             f"Create exactly {num_questions} multiple choice quiz questions covering these study concepts:\n\n{concepts_block}{context_block}{profile_block}\n\n"
-            "Use ONLY the supplied retrieved source context for factual claims. Do not invent facts or questions. "
-            "If the supplied retrieved sources are insufficient to answer the task, return INSUFFICIENT_SOURCE_CONTENT. "
-            "Make sure the options array has exactly 4 items, correct_option_index is between 0 and 3, and questions are challenging and educational."
+            "Generate questions strictly grounded in the concepts, descriptions, and supplied context. "
+            "Ensure the options array has exactly 4 items, correct_option_index is between 0 and 3, and questions are educational and accurate."
         )
 
         response = await asyncio.to_thread(
@@ -132,7 +131,7 @@ class GeminiProvider(AIProvider):
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         response = await asyncio.to_thread(
             self.client.models.embed_content,
-            model="models/embedding-001",
+            model="models/gemini-embedding-001",
             contents=texts
         )
         return [e.values for e in response.embeddings]
@@ -220,15 +219,12 @@ class GroqProvider(AIProvider):
                     "role": "system",
                     "content": (
                         "You are MK-Path's grounded learning assistant. "
-                        "Use ONLY the supplied retrieved source context for factual claims about the user's uploaded material. "
-                        "Do not invent facts, questions, or assignment content. If the supplied retrieved sources are insufficient, "
-                        "return INSUFFICIENT_SOURCE_CONTENT. "
-                        "Generate a JSON list of multiple-choice questions "
-                        "based on the provided concepts. Return your output strictly as a JSON object matching this structure: "
+                        "Generate rigorous, high-quality multiple choice assessment questions grounded in the provided concepts, study context, and student profile. "
+                        "Return your output strictly as a JSON object matching this structure: "
                         '{"questions": [{"concept_id": "concept_database_id", "concept_name": "concept_name", '
                         '"question_text": "question prompt", "options": ["Option A", "Option B", "Option C", "Option D"], '
-                        '"correct_option_index": 0, "difficulty": "basic", "explanation": "justification", "source_refs": [{"chunk_id": "..."}]}]}. '
-                        "Do not include any extra text."
+                        '"correct_option_index": 0, "difficulty": "basic", "explanation": "justification", "source_refs": []}]}. '
+                        "Do not output plain text or markdown outside of the valid JSON object."
                     )
                 },
                 {
@@ -527,7 +523,7 @@ class AIService:
         gemini_keys = settings.GEMINI_API_KEYS
         if gemini_keys:
             key = gemini_keys[0] # Just use the first key
-            provider_obj = GeminiProvider(api_key=key, model_name="text-embedding-004")
+            provider_obj = GeminiProvider(api_key=key, model_name="models/gemini-embedding-001")
             try:
                 embeddings = await provider_obj.generate_embeddings(texts)
                 return embeddings
