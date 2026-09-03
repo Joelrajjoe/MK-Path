@@ -23,7 +23,8 @@ import {
   MicOff,
   Volume2,
   Lock,
-  Loader2
+  Loader2,
+  Layers
 } from 'lucide-react'
 
 export default function Dashboard() {
@@ -395,7 +396,35 @@ export default function Dashboard() {
               {/* Right Column: Next session, resources, achievements */}
               <div className="space-y-8">
                 
-                {/* 1. Spaced Repetition next review session */}
+                {/* 1. Spaced Repetition Flashcards & next review session */}
+                <div className="p-6 border border-slate-800 bg-slate-900/10 rounded-2xl space-y-4 shadow-sm">
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider pb-2 border-b border-slate-850 flex items-center justify-between">
+                    <span>Active Recall Decks</span>
+                    <Link to="/flashcards" className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center space-x-1">
+                      <span>Open Deck</span>
+                      <ArrowRight size={10} />
+                    </Link>
+                  </h3>
+                  <div className="p-4 bg-purple-950/10 border border-purple-900/20 rounded-xl space-y-3">
+                    <div className="flex items-center space-x-3">
+                      <div className="p-2.5 rounded-lg bg-purple-600/10 text-purple-400 border border-purple-500/20">
+                        <Layers size={18} />
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="font-extrabold text-white text-xs block">Spaced Repetition System</span>
+                        <span className="text-[10px] text-slate-400">SM-2 active recall interval cards</span>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => navigate('/flashcards')}
+                      className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl flex items-center justify-center space-x-1.5 shadow-md shadow-purple-600/20 cursor-pointer"
+                    >
+                      <Sparkles size={12} />
+                      <span>Review Flashcards</span>
+                    </button>
+                  </div>
+                </div>
+
                 {stats?.next_session_concept && (
                   <div className="p-6 border border-slate-800 bg-slate-900/10 rounded-2xl space-y-4 shadow-sm">
                     <h3 className="text-xs font-bold text-white uppercase tracking-wider pb-2 border-b border-slate-850">

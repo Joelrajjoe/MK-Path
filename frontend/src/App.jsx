@@ -8,6 +8,7 @@ import SignUpPage from './pages/SignUpPage'
 import Dashboard from './pages/Dashboard'
 import Materials from './pages/Materials'
 import KnowledgeGraph from './pages/KnowledgeGraph'
+import Flashcards from './pages/Flashcards'
 import Assessment from './pages/Assessment'
 import StudyPath from './pages/StudyPath'
 import Resources from './pages/Resources'
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="materials" element={<Materials />} />
             <Route path="knowledge-graph" element={<KnowledgeGraph />} />
+            <Route path="flashcards" element={<Flashcards />} />
             <Route path="assessment" element={<Assessment />} />
             <Route path="study-path" element={<StudyPath />} />
             <Route path="resources" element={<Resources />} />

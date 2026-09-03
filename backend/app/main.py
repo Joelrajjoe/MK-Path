@@ -11,7 +11,12 @@ from .config import settings
 from .database import db_manager, get_db
 from .auth import get_current_user
 from . import crud
-from .models import UserProfile, Material, Concept, Relationship, Question, Attempt, Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, Assignment, AssignmentQuestion, ResourceFeedback
+from .models import (
+    UserProfile, Material, Concept, Relationship, Question, Attempt, 
+    Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, 
+    Assignment, AssignmentQuestion, ResourceFeedback, Flashcard, 
+    FlashcardReviewRequest, GenerateFlashcardsRequest
+)
 from .services.ai import AIService
 from .services.extractors import (
     PDFExtractor,
@@ -2255,5 +2260,267 @@ async def submit_assignment(
         "xp_earned": xp_earned,
         "per_question_results": per_question_results
     }
+
+
+# ─── Spaced Repetition Flashcards & Active Recall API ──────────────────────────
+
+@app.get("/api/flashcards")
+async def get_flashcards(
+    concept_id: Optional[str] = None,
+    material_id: Optional[str] = None,
+    state: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve all flashcards for the current user with optional filters."""
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        cards = await crud.get_flashcards(db, clerk_id, concept_id=concept_id, material_id=material_id, state=state)
+        return cards
+    except Exception as e:
+        logger.error(f"Error fetching flashcards for user {clerk_id}: {e}")
+        return []
+
+@app.get("/api/flashcards/due")
+async def get_due_flashcards(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve flashcards due for spaced-repetition review today."""
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        due_cards = await crud.get_due_flashcards(db, clerk_id, limit=limit)
+        return due_cards
+    except Exception as e:
+        logger.error(f"Error fetching due flashcards: {e}")
+        return []
+
+@app.post("/api/flashcards/generate")
+async def generate_flashcards(
+    req: GenerateFlashcardsRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Generate high-yield active-recall flashcards using grounded AI."""
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Resolve Target Concepts
+    all_concepts = await crud.get_concepts(db, clerk_id)
+    if not all_concepts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No concepts found. Please upload materials and extract concepts first."
+        )
+        
+    target_concepts = all_concepts
+    if req.concept_ids:
+        id_set = set(req.concept_ids)
+        target_concepts = [c for c in all_concepts if str(c["_id"]) in id_set or c.get("name") in id_set]
+    elif req.material_id:
+        target_concepts = [c for c in all_concepts if str(c.get("material_id")) == req.material_id]
+        
+    if not target_concepts:
+        target_concepts = all_concepts[:5] # Default to first 5 concepts
+
+    # 2. Retrieve relevant context chunks if material provided
+    context_chunks = []
+    if req.material_id:
+        chunks = await crud.get_material_chunks(db, req.material_id)
+        context_chunks = [c.get("text", "") for c in chunks if c.get("text")]
+        
+    # 3. Call AI Service
+    try:
+        generated_raw = await AIService.generate_flashcards(
+            concepts=target_concepts,
+            cards_per_concept=req.cards_per_concept,
+            context_chunks=context_chunks
+        )
+    except Exception as e:
+        logger.error(f"Error generating flashcards with AI: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service failed to generate flashcards."
+        )
+
+    # 4. Map and Validate Flashcard Models
+    name_to_concept = {c["name"]: c for c in target_concepts}
+    default_concept = target_concepts[0]
+    
+    flashcard_models: List[Flashcard] = []
+    for g in generated_raw:
+        matched = name_to_concept.get(g.get("concept_name"), default_concept)
+        concept_id = str(matched["_id"])
+        concept_name = matched["name"]
+        material_id = str(matched.get("material_id")) if matched.get("material_id") else req.material_id
+        
+        card = Flashcard(
+            clerk_user_id=clerk_id,
+            concept_id=concept_id,
+            concept_name=concept_name,
+            material_id=material_id,
+            front=g.get("front", f"Explain {concept_name}"),
+            back=g.get("back", matched.get("description", "")),
+            card_type=g.get("card_type", "standard"),
+            difficulty=g.get("difficulty", matched.get("difficulty", "basic")),
+            repetitions=0,
+            interval_days=1.0,
+            ease_factor=2.5,
+            next_review_at=datetime.utcnow(),
+            state="new"
+        )
+        flashcard_models.append(card)
+
+    if not flashcard_models:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No flashcards could be generated from the selected concepts."
+        )
+
+    saved_cards = await crud.create_flashcards(db, flashcard_models)
+    
+    # Log user activity
+    await crud.log_user_activity(
+        db, clerk_id,
+        event_type="flashcards_generated",
+        entity_type="flashcard_deck",
+        metadata={"count": len(saved_cards), "concepts": [c["name"] for c in target_concepts]}
+    )
+    
+    return {
+        "success": True,
+        "count": len(saved_cards),
+        "flashcards": saved_cards
+    }
+
+@app.post("/api/flashcards/review")
+async def review_flashcard(
+    req: FlashcardReviewRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Review a flashcard using the SuperMemo-2 (SM-2) spaced repetition algorithm.
+    Rating scale:
+      1: Again (Complete blackout / Fail)
+      2: Hard (Recall with heavy hesitation)
+      3: Good (Accurate recall with reasonable effort)
+      4: Easy (Flawless, instantaneous recall)
+    """
+    clerk_id = current_user["clerk_user_id"]
+    card = await crud.get_flashcard(db, req.card_id, clerk_id)
+    if not card:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Flashcard not found."
+        )
+
+    # Current SM-2 Parameters
+    repetitions = card.get("repetitions", 0)
+    interval = card.get("interval_days", 1.0)
+    ease_factor = card.get("ease_factor", 2.5)
+    total_reviews = card.get("total_reviews", 0) + 1
+    lapses = card.get("lapses", 0)
+    rating = req.rating  # 1, 2, 3, 4
+
+    # Calculate SM-2 Step
+    # Quality scale (q from 0 to 5, mapped from 1-4 rating: 1->0, 2->3, 3->4, 4->5)
+    quality_map = {1: 0, 2: 3, 3: 4, 4: 5}
+    q = quality_map.get(rating, 3)
+
+    if q < 3:
+        # Failed recall (Again)
+        repetitions = 0
+        interval = 1.0
+        lapses += 1
+        state = "learning"
+        is_correct = False
+    else:
+        # Successful recall (Hard, Good, Easy)
+        if repetitions == 0:
+            interval = 1.0
+        elif repetitions == 1:
+            interval = 6.0 if rating >= 3 else 3.0
+        else:
+            multiplier = ease_factor * (1.3 if rating == 4 else 1.0 if rating == 3 else 0.8)
+            interval = max(1.0, interval * multiplier)
+            
+        repetitions += 1
+        state = "mastered" if (repetitions >= 4 and ease_factor >= 2.3) else "review"
+        is_correct = True
+
+    # Update Ease Factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+    ease_factor = ease_factor + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+    ease_factor = max(1.3, round(ease_factor, 3)) # Minimum threshold is 1.3
+
+    now = datetime.utcnow()
+    next_review = now + timedelta(days=interval)
+
+    updates = {
+        "repetitions": repetitions,
+        "interval_days": round(interval, 2),
+        "ease_factor": ease_factor,
+        "last_reviewed_at": now,
+        "next_review_at": next_review,
+        "state": state,
+        "total_reviews": total_reviews,
+        "lapses": lapses
+    }
+
+    await crud.update_flashcard(db, req.card_id, clerk_id, updates)
+
+    # Gamification XP: +5 XP for successful recall, +10 XP for Easy, +15 XP for card mastery
+    xp_awarded = 0
+    try:
+        if is_correct:
+            xp_awarded = await GamificationService.award_xp(
+                db, clerk_id, "flashcard_reviewed",
+                {"card_id": req.card_id, "rating": rating, "concept_name": card.get("concept_name")}
+            )
+    except Exception as e:
+        logger.warning(f"XP award for flashcard review failed: {e}")
+
+    # Synchronize with Bayesian Knowledge Tracing (KTService)
+    try:
+        await KTService.update_mastery(
+            db=db,
+            clerk_user_id=clerk_id,
+            concept_id=card["concept_id"],
+            concept_name=card["concept_name"],
+            is_correct=is_correct,
+            confidence=max(1, min(5, rating + 1)),
+            response_time=req.response_time_seconds or 5.0
+        )
+    except Exception as e:
+        logger.warning(f"BKT sync failed for flashcard: {e}")
+
+    return {
+        "success": True,
+        "card_id": req.card_id,
+        "is_correct": is_correct,
+        "repetitions": repetitions,
+        "interval_days": round(interval, 2),
+        "ease_factor": ease_factor,
+        "next_review_at": next_review,
+        "state": state,
+        "xp_earned": xp_awarded
+    }
+
+@app.delete("/api/flashcards/{card_id}")
+async def delete_flashcard(
+    card_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete an individual flashcard."""
+    clerk_id = current_user["clerk_user_id"]
+    deleted = await crud.delete_flashcard(db, card_id, clerk_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Flashcard not found or not owned by user."
+        )
+    return {"success": True, "deleted_id": card_id}
+
 
 

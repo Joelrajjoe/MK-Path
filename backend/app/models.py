@@ -263,3 +263,46 @@ class RAGContext(BaseModel):
     current_concept: Optional[Dict[str, Any]] = None
     current_material: Optional[Dict[str, Any]] = None
     learning_state: Optional[Dict[str, Any]] = None
+
+
+# --- Spaced Repetition Flashcard System Models ---
+
+class Flashcard(BaseModel):
+    """An active recall flashcard generated from concept or material."""
+    clerk_user_id: str = Field(...)
+    concept_id: str = Field(..., description="Target concept ID")
+    concept_name: str = Field(...)
+    material_id: Optional[str] = Field(None, description="Optional source material ID")
+    front: str = Field(..., description="Flashcard question/prompt/term")
+    back: str = Field(..., description="Flashcard answer/explanation/key points")
+    card_type: str = Field("standard", description="standard, cloze, code, scenario")
+    difficulty: str = Field("basic", description="basic, intermediate, advanced")
+    
+    # SM-2 / Anki Algorithm Parameters
+    repetitions: int = Field(0, description="Consecutive successful recall repetitions")
+    interval_days: float = Field(1.0, description="Interval in days until next review")
+    ease_factor: float = Field(2.5, description="SM-2 Ease Factor (minimum 1.3)")
+    last_reviewed_at: Optional[datetime] = None
+    next_review_at: datetime = Field(default_factory=datetime.utcnow)
+    state: str = Field("new", description="new, learning, review, mastered")
+    
+    # Observability & Metadata
+    total_reviews: int = Field(0)
+    lapses: int = Field(0, description="Count of failing recall on review card")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class FlashcardReviewRequest(BaseModel):
+    """Payload when a user reviews a flashcard."""
+    card_id: str
+    rating: int = Field(..., ge=1, le=4, description="1: Again (Fail), 2: Hard, 3: Good, 4: Easy")
+    response_time_seconds: Optional[float] = Field(5.0)
+
+
+class GenerateFlashcardsRequest(BaseModel):
+    """Payload to generate AI flashcards for concepts or materials."""
+    concept_ids: Optional[List[str]] = Field(default_factory=list)
+    material_id: Optional[str] = None
+    cards_per_concept: int = Field(2, ge=1, le=10)
+    include_scenarios: bool = Field(True)

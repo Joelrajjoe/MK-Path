@@ -18,7 +18,8 @@ import {
   X,
   Trophy,
   ClipboardList,
-  User
+  User,
+  Layers
 } from 'lucide-react'
 
 export default function Layout() {
@@ -57,6 +58,7 @@ export default function Layout() {
       case '/dashboard': return 'Dashboard'
       case '/materials': return 'Study Materials'
       case '/knowledge-graph': return 'Interactive Knowledge Graph'
+      case '/flashcards': return 'Spaced-Repetition Flashcards'
       case '/assessment': return 'Adaptive Assessment'
       case '/study-path': return 'Personalized Study Path'
       case '/resources': return 'Recommended Resources'
@@ -75,6 +77,7 @@ export default function Layout() {
     { to: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
     { to: '/materials', label: 'Materials', icon: <FileText size={18} /> },
     { to: '/knowledge-graph', label: 'Knowledge Graph', icon: <GitBranch size={18} /> },
+    { to: '/flashcards', label: 'Flashcards', icon: <Layers size={18} /> },
     { to: '/assessment', label: 'Assessment', icon: <GraduationCap size={18} /> },
     { to: '/study-path', label: 'Study Path', icon: <Compass size={18} /> },
     { to: '/assignments', label: 'Assignments', icon: <ClipboardList size={18} /> },

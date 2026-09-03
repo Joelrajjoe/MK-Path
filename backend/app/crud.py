@@ -2,7 +2,11 @@ import logging
 from datetime import datetime
 from bson import ObjectId
 from typing import List, Optional, Dict, Any
-from .models import UserProfile, Material, Concept, Relationship, Question, Attempt, Mastery, StudyPath, Resource, Gamification, LearnerEvent, ResourceFeedback, MaterialChunk, UserActivity
+from .models import (
+    UserProfile, Material, Concept, Relationship, Question, Attempt, 
+    Mastery, StudyPath, Resource, Gamification, LearnerEvent, ResourceFeedback, 
+    MaterialChunk, UserActivity, Flashcard
+)
 import math
 from .database import DatabaseManager
 
@@ -47,6 +51,7 @@ _DEMO_DB: Dict[str, List[Dict[str, Any]]] = {
     "resources": [],
     "material_chunks": [],
     "user_activity": [],
+    "flashcards": [],
     "gamification": [
         {
             "_id": ObjectId("64e8cf65f5a65c4dbf000002"),
@@ -952,3 +957,119 @@ async def log_user_activity(db, clerk_user_id: str, event_type: str, entity_type
         return True
     _demo_insert("user_activity", activity)
     return True
+
+
+# ─── Spaced Repetition Flashcard CRUD ─────────────────────────────────────────
+
+async def create_flashcards(db, flashcards: List[Flashcard]) -> List[Dict[str, Any]]:
+    """Bulk create flashcards for a user."""
+    docs = [f.model_dump() for f in flashcards]
+    for d in docs:
+        d["created_at"] = d.get("created_at") or datetime.utcnow()
+        d["updated_at"] = d.get("updated_at") or datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        result = await col.insert_many(docs)
+        for idx, inserted_id in enumerate(result.inserted_ids):
+            docs[idx]["_id"] = inserted_id
+        return serialize_docs(docs)
+    
+    for d in docs:
+        _demo_insert("flashcards", d)
+    return serialize_docs(docs)
+
+async def get_flashcards(db, clerk_user_id: str, concept_id: str = None, material_id: str = None, state: str = None) -> List[Dict[str, Any]]:
+    """Retrieve flashcards with optional filtering."""
+    query: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+    if concept_id:
+        query["concept_id"] = concept_id
+    if material_id:
+        query["material_id"] = material_id
+    if state:
+        query["state"] = state
+        
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        cursor = col.find(query).sort("created_at", -1)
+        cards = await cursor.to_list(length=500)
+        return serialize_docs(cards)
+    
+    results = [
+        d for d in _DEMO_DB.get("flashcards", [])
+        if d.get("clerk_user_id") == clerk_user_id
+        and (not concept_id or d.get("concept_id") == concept_id)
+        and (not material_id or d.get("material_id") == material_id)
+        and (not state or d.get("state") == state)
+    ]
+    return serialize_docs(results)
+
+async def get_flashcard(db, card_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single flashcard by ID."""
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        try:
+            doc = await col.find_one({"_id": ObjectId(card_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+    doc = _demo_find_one("flashcards", {"_id": card_id, "clerk_user_id": clerk_user_id})
+    return serialize_doc(doc)
+
+async def update_flashcard(db, card_id: str, clerk_user_id: str, updates: Dict[str, Any]) -> bool:
+    """Update review parameters and state of a flashcard."""
+    updates["updated_at"] = datetime.utcnow()
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(card_id), "clerk_user_id": clerk_user_id},
+                {"$set": updates}
+            )
+            return res.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating flashcard {card_id}: {e}")
+            return False
+            
+    doc = _demo_find_one("flashcards", {"_id": card_id, "clerk_user_id": clerk_user_id})
+    if doc:
+        doc.update(updates)
+        return True
+    return False
+
+async def delete_flashcard(db, card_id: str, clerk_user_id: str) -> bool:
+    """Delete a flashcard by ID."""
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        try:
+            res = await col.delete_one({"_id": ObjectId(card_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+            
+    cards = _DEMO_DB.get("flashcards", [])
+    before_len = len(cards)
+    _DEMO_DB["flashcards"] = [c for c in cards if not (str(c.get("_id")) == card_id and c.get("clerk_user_id") == clerk_user_id)]
+    return len(_DEMO_DB["flashcards"]) < before_len
+
+async def get_due_flashcards(db, clerk_user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve flashcards that are due for spaced repetition review today."""
+    now = datetime.utcnow()
+    if db.is_online:
+        col = db.get_collection("flashcards")
+        query = {
+            "clerk_user_id": clerk_user_id,
+            "next_review_at": {"$lte": now}
+        }
+        cursor = col.find(query).sort("next_review_at", 1).limit(limit)
+        cards = await cursor.to_list(length=limit)
+        return serialize_docs(cards)
+        
+    results = [
+        d for d in _DEMO_DB.get("flashcards", [])
+        if d.get("clerk_user_id") == clerk_user_id
+        and (d.get("next_review_at", now) <= now or d.get("state") == "new")
+    ]
+    results.sort(key=lambda x: x.get("next_review_at", now))
+    return serialize_docs(results[:limit])
+
