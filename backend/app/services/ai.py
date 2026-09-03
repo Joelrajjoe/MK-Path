@@ -83,6 +83,16 @@ class StudyNoteItemSchema(BaseModel):
 class StudyNotesGenerationOutput(BaseModel):
     notes: List[StudyNoteItemSchema]
 
+class PodcastDialogueTurnSchema(BaseModel):
+    speaker: str = Field(description="'Alex' (deep-dive lead researcher) or 'Sam' (curious analytical co-host)")
+    text: str = Field(description="Spoken conversation line")
+    emotion: Optional[str] = Field("enthusiastic", description="enthusiastic, questioning, explanatory, humorous")
+
+class PodcastGenerationOutput(BaseModel):
+    title: str = Field(description="Catchy, engaging podcast episode title")
+    summary: str = Field(description="1-2 sentence executive overview of the episode")
+    script: List[PodcastDialogueTurnSchema] = Field(description="10-18 dynamic alternating conversational dialogue turns between Alex and Sam")
+
 
 # --- OOP Provider Abstraction ---
 
@@ -292,6 +302,44 @@ class GeminiProvider(AIProvider):
             )
         )
         return response.text or "I'm ready to guide your inquiry. What concept would you like to explore?"
+
+    async def generate_podcast(
+        self,
+        material_title: str,
+        concepts: List[Dict[str, Any]],
+        context_chunks: List[str],
+        style: str = "dynamic"
+    ) -> Dict[str, Any]:
+        """Generate a two-host deep-dive audio podcast episode script."""
+        concepts_block = "\n".join([f"- {c['name']}: {c.get('description', '')}" for c in concepts[:8]])
+        context_block = "\n---\n".join(context_chunks[:10])
+
+        prompt = (
+            "You are MK-Path's audio podcast generation director (inspired by Google NotebookLM Audio Overviews). "
+            f"Generate a captivating two-host podcast episode discussing the study material: '{material_title}'.\n\n"
+            f"Key Concepts to Explore:\n{concepts_block}\n\n"
+            f"Source Text Context:\n{context_block}\n\n"
+            "Format Requirements:\n"
+            "1. Two dynamic hosts: 'Alex' (lead conceptual investigator, provides deep analogies) and 'Sam' (curious co-host, asks provocative questions and connects concepts to real life).\n"
+            "2. Make the conversation natural, entertaining, intellectual, and grounded in the source text.\n"
+            "3. Include 12-16 alternating dialogue turns.\n"
+            "4. Output strictly structured JSON matching PodcastGenerationOutput."
+        )
+
+        response = await asyncio.to_thread(
+            self.client.models.generate_content,
+            model=self.model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=PodcastGenerationOutput,
+                temperature=0.4
+            )
+        )
+        
+        raw_res = response.text
+        data = json.loads(raw_res)
+        return data
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         response = await asyncio.to_thread(
@@ -577,6 +625,55 @@ class GroqProvider(AIProvider):
         else:
             raise Exception(f"Groq Tutor API error: {response.status_code} - {response.text}")
 
+    async def generate_podcast(
+        self,
+        material_title: str,
+        concepts: List[Dict[str, Any]],
+        context_chunks: List[str],
+        style: str = "dynamic"
+    ) -> Dict[str, Any]:
+        concepts_block = "\n".join([f"- {c['name']}: {c.get('description', '')}" for c in concepts[:8]])
+        context_block = "\n---\n".join(context_chunks[:6])
+
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are MK-Path's audio podcast generator. "
+                        "Return strictly a JSON object with: 'title' (string), 'summary' (string), and 'script' (list of alternating {'speaker': 'Alex'|'Sam', 'text': string, 'emotion': string}). "
+                        "Make the discussion entertaining, analytical and educational."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Generate a two-host podcast discussing '{material_title}'. Concepts:\n{concepts_block}\nContext:\n{context_block}"
+                }
+            ]
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        response = await asyncio.to_thread(
+            requests.post,
+            "https://api.groq.com/openai/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=25
+        )
+
+        if response.status_code == 200:
+            res_json = response.json()
+            content = res_json["choices"][0]["message"]["content"]
+            return json.loads(content)
+        else:
+            raise Exception(f"Groq Podcast API error: {response.status_code} - {response.text}")
+
 
 class LocalFallbackProvider(AIProvider):
     async def extract_concepts_and_relationships(self, text: str) -> Dict[str, Any]:
@@ -596,6 +693,29 @@ class LocalFallbackProvider(AIProvider):
                 "difficulty": c.get("difficulty", "basic")
             })
         return cards
+
+    async def generate_podcast(
+        self,
+        material_title: str,
+        concepts: List[Dict[str, Any]],
+        context_chunks: List[str],
+        style: str = "dynamic"
+    ) -> Dict[str, Any]:
+        turns = [
+            {"speaker": "Alex", "text": f"Welcome to today's MK-Path deep-dive! Today we're exploring {material_title}.", "emotion": "enthusiastic"},
+            {"speaker": "Sam", "text": "I've been looking forward to this one. What makes these concepts so essential?", "emotion": "questioning"}
+        ]
+        for c in concepts[:3]:
+            turns.append({"speaker": "Alex", "text": f"Let's look at {c['name']}. {c.get('description', 'This is a foundational concept.')}", "emotion": "explanatory"})
+            turns.append({"speaker": "Sam", "text": f"That makes total sense. So how does {c['name']} connect with practical real-world problems?", "emotion": "questioning"})
+            turns.append({"speaker": "Alex", "text": f"When applied correctly, it prevents common pitfalls and establishes structured mental models.", "emotion": "enthusiastic"})
+        turns.append({"speaker": "Sam", "text": "That's a wrap on this overview! Time to test our mastery in the assessment module.", "emotion": "enthusiastic"})
+        
+        return {
+            "title": f"Deep Dive: {material_title}",
+            "summary": f"An audio exploration of {len(concepts)} key curriculum concepts.",
+            "script": turns
+        }
 
     async def socratic_chat(
         self,
@@ -1237,6 +1357,113 @@ class AIService:
         except Exception as e:
             logger.error(f"Local Socratic chat fallback failed: {e}")
             return f"Let's focus on **{concept_name or 'your topic'}**. How can I help clarify this concept?"
+
+    @classmethod
+    async def generate_podcast(
+        cls,
+        material_title: str,
+        concepts: List[Dict[str, Any]],
+        context_chunks: List[str],
+        style: str = "dynamic"
+    ) -> Dict[str, Any]:
+        """
+        Synthesizes a NotebookLM-style multi-speaker deep-dive podcast episode.
+        Cycles through Gemini -> Groq -> Local Fallback.
+        """
+        gemini_keys = settings.GEMINI_API_KEYS
+        gemini_model = settings.GEMINI_MODEL or "gemini-3.5-flash"
+        
+        # Stage 1: Gemini
+        if gemini_keys:
+            for idx, key in enumerate(gemini_keys):
+                start_time = time.perf_counter()
+                provider = "Gemini"
+                model_name = gemini_model
+                success = False
+                error_category = "None"
+                
+                try:
+                    provider_obj = GeminiProvider(api_key=key, model_name=model_name)
+                    podcast_data = await provider_obj.generate_podcast(
+                        material_title=material_title,
+                        concepts=concepts,
+                        context_chunks=context_chunks,
+                        style=style
+                    )
+                    success = True
+                    cls._log_observability(
+                        operation="generate_podcast",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=False,
+                        error_category=error_category
+                    )
+                    return podcast_data
+                except Exception as e:
+                    success = False
+                    error_category = cls._categorize_error(e)
+                    cls._log_observability(
+                        operation="generate_podcast",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=True,
+                        error_category=error_category
+                    )
+                    logger.error(f"Gemini Podcast generation failed (Key {idx+1}/{len(gemini_keys)}): {e}")
+
+        # Stage 2: Groq Fallback
+        if settings.GROQ_API_KEY:
+            start_time = time.perf_counter()
+            provider = "Groq"
+            model_name = "openai/gpt-oss-120b"
+            success = False
+            error_category = "None"
+            
+            try:
+                provider_obj = GroqProvider(api_key=settings.GROQ_API_KEY)
+                podcast_data = await provider_obj.generate_podcast(
+                    material_title=material_title,
+                    concepts=concepts,
+                    context_chunks=context_chunks,
+                    style=style
+                )
+                success = True
+                cls._log_observability(
+                    operation="generate_podcast",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                return podcast_data
+            except Exception as e:
+                success = False
+                error_category = cls._categorize_error(e)
+                cls._log_observability(
+                    operation="generate_podcast",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                logger.error(f"Groq Podcast fallback failed: {e}")
+
+        # Stage 3: Local Fallback
+        provider_obj = LocalFallbackProvider()
+        return await provider_obj.generate_podcast(
+            material_title=material_title,
+            concepts=concepts,
+            context_chunks=context_chunks,
+            style=style
+        )
 
     @classmethod
     async def generate_embeddings(cls, texts: List[str]) -> List[List[float]]:

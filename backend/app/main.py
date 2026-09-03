@@ -16,7 +16,8 @@ from .models import (
     Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, 
     Assignment, AssignmentQuestion, ResourceFeedback, Flashcard, 
     FlashcardReviewRequest, GenerateFlashcardsRequest, StudyNote, GenerateStudyNotesRequest,
-    TutorChatMessage, TutorSession, TutorChatRequest
+    TutorChatMessage, TutorSession, TutorChatRequest,
+    PodcastOverview, PodcastDialogueTurn, GeneratePodcastRequest
 )
 from .services.ai import AIService
 from .services.extractors import (
@@ -2950,6 +2951,148 @@ async def delete_tutor_session(
             detail="Tutor session not found or not owned by user."
         )
     return {"success": True, "deleted_id": session_id}
+
+
+# ─── Multi-Speaker Audio Podcast Overview API (NotebookLM-Style) ──────────────
+
+@app.get("/api/podcasts")
+async def list_podcasts(
+    material_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """List all synthesized audio podcast overviews for the user."""
+    clerk_id = current_user["clerk_user_id"]
+    podcasts = await crud.get_podcasts(db, clerk_id, material_id)
+    return podcasts
+
+@app.get("/api/podcasts/{podcast_id}")
+async def get_podcast(
+    podcast_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve single podcast episode with full dialogue script."""
+    clerk_id = current_user["clerk_user_id"]
+    podcast = await crud.get_podcast(db, podcast_id, clerk_id)
+    if not podcast:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Podcast episode not found."
+        )
+    return podcast
+
+@app.post("/api/podcasts/generate")
+async def generate_podcast_episode(
+    req: GeneratePodcastRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Generate a dynamic two-host conversational deep-dive audio podcast from materials.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Resolve Target Material & Concepts
+    material_title = "Curriculum Overview"
+    context_chunks = []
+    
+    if req.material_id:
+        mat = await crud.get_material(db, req.material_id, clerk_id)
+        if mat:
+            material_title = mat.get("title", "Study Material")
+        m_chunks = await crud.get_material_chunks(db, req.material_id)
+        context_chunks = [c.get("text", "") for c in m_chunks if c.get("text")]
+        
+    all_concepts = await crud.get_concepts(db, clerk_id)
+    target_concepts = []
+    if req.concept_ids:
+        target_concepts = [c for c in all_concepts if str(c.get("_id")) in req.concept_ids or c.get("id") in req.concept_ids]
+    elif req.material_id:
+        target_concepts = [c for c in all_concepts if c.get("material_id") == req.material_id]
+        
+    if not target_concepts:
+        target_concepts = all_concepts[:6]
+        
+    # If no chunk text found from material, construct from concepts
+    if not context_chunks:
+        context_chunks = [
+            f"Concept {c['name']} (Difficulty: {c.get('difficulty')}): {c.get('description', '')}"
+            for c in target_concepts
+        ]
+
+    # 2. Call AI Synthesis Engine
+    raw_podcast = await AIService.generate_podcast(
+        material_title=material_title,
+        concepts=target_concepts,
+        context_chunks=context_chunks,
+        style=req.style
+    )
+    
+    # 3. Build Model Object
+    script_turns = []
+    for turn in raw_podcast.get("script", []):
+        speaker = turn.get("speaker", "Alex")
+        # Ensure pitch and rate differences between hosts
+        pitch = 1.05 if speaker == "Sam" else 0.95
+        rate = 1.02 if speaker == "Sam" else 0.98
+        script_turns.append(
+            PodcastDialogueTurn(
+                speaker=speaker,
+                text=turn.get("text", ""),
+                emotion=turn.get("emotion", "enthusiastic"),
+                pitch=pitch,
+                rate=rate
+            )
+        )
+        
+    podcast_model = PodcastOverview(
+        clerk_user_id=clerk_id,
+        material_id=req.material_id,
+        material_title=material_title,
+        concept_ids=[str(c.get("_id") or c.get("id")) for c in target_concepts],
+        title=raw_podcast.get("title", f"Deep Dive: {material_title}"),
+        summary=raw_podcast.get("summary", "Interactive conversational audio overview."),
+        episode_duration_est_minutes=round(len(script_turns) * 0.25, 1),
+        hosts=["Alex (Lead Researcher)", "Sam (Curious Explorer)"],
+        script=script_turns
+    )
+    
+    # 4. Save in DB
+    saved_podcast = await crud.create_podcast(db, podcast_model)
+    
+    # 5. Award Gamification XP (+20 XP for audio synthesis)
+    try:
+        await GamificationService.award_xp(
+            db=db,
+            clerk_user_id=clerk_id,
+            action="podcast_generation",
+            metadata={"title": podcast_model.title}
+        )
+    except Exception as e:
+        logger.warning(f"XP award for podcast generation failed: {e}")
+        
+    return {
+        "success": True,
+        "podcast": saved_podcast
+    }
+
+@app.delete("/api/podcasts/{podcast_id}")
+async def delete_podcast(
+    podcast_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete a podcast episode."""
+    clerk_id = current_user["clerk_user_id"]
+    deleted = await crud.delete_podcast(db, podcast_id, clerk_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Podcast episode not found or not owned by user."
+        )
+    return {"success": True, "deleted_id": podcast_id}
+
 
 
 

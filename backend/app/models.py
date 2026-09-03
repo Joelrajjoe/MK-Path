@@ -367,3 +367,33 @@ class TutorChatRequest(BaseModel):
     tutor_mode: str = Field("socratic", description="socratic (guided inquiry), direct_explainer, or exam_coach")
 
 
+class PodcastDialogueTurn(BaseModel):
+    speaker: str = Field(..., description="'Alex' (deep-dive expert host) or 'Sam' (curious co-host)")
+    text: str = Field(..., description="Spoken dialogue line")
+    emotion: Optional[str] = Field("enthusiastic", description="enthusiastic, questioning, explanatory, humorous")
+    pitch: Optional[float] = Field(1.0, description="Voice pitch multiplier for TTS")
+    rate: Optional[float] = Field(1.0, description="Voice speech rate for TTS")
+
+
+class PodcastOverview(BaseModel):
+    """Deep-dive dynamic multi-speaker audio podcast generated from user materials."""
+    clerk_user_id: str
+    material_id: Optional[str] = None
+    material_title: Optional[str] = None
+    concept_ids: List[str] = Field(default_factory=list)
+    title: str
+    summary: str
+    episode_duration_est_minutes: float = Field(3.5)
+    hosts: List[str] = Field(default_factory=lambda: ["Alex (Lead Researcher)", "Sam (Curious Explorer)"])
+    script: List[PodcastDialogueTurn] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GeneratePodcastRequest(BaseModel):
+    material_id: Optional[str] = None
+    concept_ids: Optional[List[str]] = Field(default_factory=list)
+    style: str = Field("dynamic", description="dynamic (engaging & lively), academic (deep analytical), or exam_prep (high-yield rapid recall)")
+
+
+

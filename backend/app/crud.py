@@ -5,7 +5,8 @@ from typing import List, Optional, Dict, Any
 from .models import (
     UserProfile, Material, Concept, Relationship, Question, Attempt, 
     Mastery, StudyPath, Resource, Gamification, LearnerEvent, ResourceFeedback, 
-    MaterialChunk, UserActivity, Flashcard, StudyNote, TutorSession, TutorChatMessage
+    MaterialChunk, UserActivity, Flashcard, StudyNote, TutorSession, TutorChatMessage,
+    PodcastOverview
 )
 import math
 from .database import DatabaseManager
@@ -54,6 +55,7 @@ _DEMO_DB: Dict[str, List[Dict[str, Any]]] = {
     "flashcards": [],
     "study_notes": [],
     "tutor_sessions": [],
+    "podcasts": [],
     "gamification": [
         {
             "_id": ObjectId("64e8cf65f5a65c4dbf000002"),
@@ -1241,6 +1243,75 @@ async def delete_tutor_session(db, session_id: str, clerk_user_id: str) -> bool:
     before_len = len(sessions)
     _DEMO_DB["tutor_sessions"] = [s for s in sessions if not (str(s.get("_id")) == session_id and s.get("clerk_user_id") == clerk_user_id)]
     return len(_DEMO_DB["tutor_sessions"]) < before_len
+
+
+# --- Multi-Speaker Podcast Overviews CRUD ---
+
+async def create_podcast(db, podcast: PodcastOverview) -> Dict[str, Any]:
+    """Save an AI-synthesized two-host audio podcast overview."""
+    doc = podcast.model_dump()
+    doc["created_at"] = datetime.utcnow()
+    doc["updated_at"] = datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("podcasts")
+        res = await col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return serialize_doc(doc)
+        
+    doc["_id"] = ObjectId()
+    _DEMO_DB["podcasts"].append(doc)
+    return serialize_doc(doc)
+
+async def get_podcasts(db, clerk_user_id: str, material_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve all synthesized audio podcasts for a learner."""
+    if db.is_online:
+        col = db.get_collection("podcasts")
+        query: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+        if material_id:
+            query["material_id"] = material_id
+        cursor = col.find(query).sort("created_at", -1)
+        podcasts = await cursor.to_list(length=50)
+        return serialize_docs(podcasts)
+        
+    results = [
+        p for p in _DEMO_DB.get("podcasts", [])
+        if p.get("clerk_user_id") == clerk_user_id
+        and (not material_id or p.get("material_id") == material_id)
+    ]
+    results.sort(key=lambda x: x.get("created_at", datetime.min), reverse=True)
+    return serialize_docs(results)
+
+async def get_podcast(db, podcast_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single audio podcast episode by ID."""
+    if db.is_online:
+        col = db.get_collection("podcasts")
+        try:
+            doc = await col.find_one({"_id": ObjectId(podcast_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+            
+    for p in _DEMO_DB.get("podcasts", []):
+        if str(p.get("_id")) == podcast_id and p.get("clerk_user_id") == clerk_user_id:
+            return serialize_doc(p)
+    return None
+
+async def delete_podcast(db, podcast_id: str, clerk_user_id: str) -> bool:
+    """Delete a synthesized podcast episode."""
+    if db.is_online:
+        col = db.get_collection("podcasts")
+        try:
+            res = await col.delete_one({"_id": ObjectId(podcast_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+            
+    podcasts = _DEMO_DB.get("podcasts", [])
+    before_len = len(podcasts)
+    _DEMO_DB["podcasts"] = [p for p in podcasts if not (str(p.get("_id")) == podcast_id and p.get("clerk_user_id") == clerk_user_id)]
+    return len(_DEMO_DB["podcasts"]) < before_len
+
 
 
 
