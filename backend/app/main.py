@@ -2540,7 +2540,7 @@ async def get_curriculum_export_report(
     user_profile = await crud.get_user_profile(db, clerk_id) or {}
     concepts = await crud.get_concepts(db, clerk_id)
     relationships = await crud.get_relationships(db, clerk_id)
-    mastery_records = await crud.get_mastery_records(db, clerk_id)
+    mastery_records = await crud.get_mastery(db, clerk_id)
     materials = await crud.get_materials(db, clerk_id)
     flashcards = await crud.get_flashcards(db, clerk_id)
     gamification = await crud.get_gamification(db, clerk_id) or {}
