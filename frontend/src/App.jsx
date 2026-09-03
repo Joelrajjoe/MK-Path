@@ -21,6 +21,7 @@ import AccessibilityPage from './pages/AccessibilityPage'
 import Search from './pages/Search'
 import ExportStudio from './pages/ExportStudio'
 import StudyNotes from './pages/StudyNotes'
+import ConceptTutor from './pages/ConceptTutor'
 import NotFound from './pages/NotFound'
 
 export default function App() {
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="knowledge-graph" element={<KnowledgeGraph />} />
             <Route path="flashcards" element={<Flashcards />} />
             <Route path="study-notes" element={<StudyNotes />} />
+            <Route path="tutor" element={<ConceptTutor />} />
             <Route path="assessment" element={<Assessment />} />
             <Route path="study-path" element={<StudyPath />} />
             <Route path="resources" element={<Resources />} />

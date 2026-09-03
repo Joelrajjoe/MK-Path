@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from .models import (
     UserProfile, Material, Concept, Relationship, Question, Attempt, 
     Mastery, StudyPath, Resource, Gamification, LearnerEvent, ResourceFeedback, 
-    MaterialChunk, UserActivity, Flashcard, StudyNote
+    MaterialChunk, UserActivity, Flashcard, StudyNote, TutorSession, TutorChatMessage
 )
 import math
 from .database import DatabaseManager
@@ -53,6 +53,7 @@ _DEMO_DB: Dict[str, List[Dict[str, Any]]] = {
     "user_activity": [],
     "flashcards": [],
     "study_notes": [],
+    "tutor_sessions": [],
     "gamification": [
         {
             "_id": ObjectId("64e8cf65f5a65c4dbf000002"),
@@ -1147,5 +1148,99 @@ async def delete_study_note(db, note_id: str, clerk_user_id: str) -> bool:
     before_len = len(notes)
     _DEMO_DB["study_notes"] = [n for n in notes if not (str(n.get("_id")) == note_id and n.get("clerk_user_id") == clerk_user_id)]
     return len(_DEMO_DB["study_notes"]) < before_len
+
+
+# --- Socratic AI Tutor CRUD ---
+
+async def create_tutor_session(db, session: TutorSession) -> Dict[str, Any]:
+    """Create a new Socratic tutor session."""
+    doc = session.model_dump()
+    doc["created_at"] = datetime.utcnow()
+    doc["updated_at"] = datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("tutor_sessions")
+        res = await col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return serialize_doc(doc)
+        
+    doc["_id"] = ObjectId()
+    _DEMO_DB["tutor_sessions"].append(doc)
+    return serialize_doc(doc)
+
+async def get_tutor_sessions(db, clerk_user_id: str, concept_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve all tutor sessions for the learner."""
+    if db.is_online:
+        col = db.get_collection("tutor_sessions")
+        query: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+        if concept_id:
+            query["concept_id"] = concept_id
+        cursor = col.find(query).sort("updated_at", -1)
+        sessions = await cursor.to_list(length=50)
+        return serialize_docs(sessions)
+        
+    results = [
+        s for s in _DEMO_DB.get("tutor_sessions", [])
+        if s.get("clerk_user_id") == clerk_user_id
+        and (not concept_id or s.get("concept_id") == concept_id)
+    ]
+    results.sort(key=lambda x: x.get("updated_at", datetime.min), reverse=True)
+    return serialize_docs(results)
+
+async def get_tutor_session(db, session_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single tutor session by ID."""
+    if db.is_online:
+        col = db.get_collection("tutor_sessions")
+        try:
+            doc = await col.find_one({"_id": ObjectId(session_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+            
+    for s in _DEMO_DB.get("tutor_sessions", []):
+        if str(s.get("_id")) == session_id and s.get("clerk_user_id") == clerk_user_id:
+            return serialize_doc(s)
+    return None
+
+async def append_tutor_message(db, session_id: str, clerk_user_id: str, message: TutorChatMessage) -> Optional[Dict[str, Any]]:
+    """Append a user or assistant message to an active tutoring session."""
+    msg_dict = message.model_dump()
+    now = datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("tutor_sessions")
+        try:
+            res = await col.find_one_and_update(
+                {"_id": ObjectId(session_id), "clerk_user_id": clerk_user_id},
+                {"$push": {"messages": msg_dict}, "$set": {"updated_at": now}},
+                return_document=True
+            )
+            return serialize_doc(res)
+        except Exception as e:
+            logger.error(f"Error appending tutor message: {e}")
+            return None
+            
+    for s in _DEMO_DB.get("tutor_sessions", []):
+        if str(s.get("_id")) == session_id and s.get("clerk_user_id") == clerk_user_id:
+            s.setdefault("messages", []).append(msg_dict)
+            s["updated_at"] = now
+            return serialize_doc(s)
+    return None
+
+async def delete_tutor_session(db, session_id: str, clerk_user_id: str) -> bool:
+    """Delete a tutor conversation session."""
+    if db.is_online:
+        col = db.get_collection("tutor_sessions")
+        try:
+            res = await col.delete_one({"_id": ObjectId(session_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+            
+    sessions = _DEMO_DB.get("tutor_sessions", [])
+    before_len = len(sessions)
+    _DEMO_DB["tutor_sessions"] = [s for s in sessions if not (str(s.get("_id")) == session_id and s.get("clerk_user_id") == clerk_user_id)]
+    return len(_DEMO_DB["tutor_sessions"]) < before_len
+
 
 

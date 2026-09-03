@@ -15,7 +15,8 @@ from .models import (
     UserProfile, Material, Concept, Relationship, Question, Attempt, 
     Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, 
     Assignment, AssignmentQuestion, ResourceFeedback, Flashcard, 
-    FlashcardReviewRequest, GenerateFlashcardsRequest, StudyNote, GenerateStudyNotesRequest
+    FlashcardReviewRequest, GenerateFlashcardsRequest, StudyNote, GenerateStudyNotesRequest,
+    TutorChatMessage, TutorSession, TutorChatRequest
 )
 from .services.ai import AIService
 from .services.extractors import (
@@ -2802,6 +2803,154 @@ async def delete_study_note(
             detail="Study note not found or not owned by user."
         )
     return {"success": True, "deleted_id": note_id}
+
+
+# ─── Socratic AI Tutor & Real-Time Concept Chat API ───────────────────────────
+
+@app.get("/api/tutor/sessions")
+async def list_tutor_sessions(
+    concept_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve all tutor sessions for the user."""
+    clerk_id = current_user["clerk_user_id"]
+    sessions = await crud.get_tutor_sessions(db, clerk_id, concept_id)
+    return sessions
+
+@app.get("/api/tutor/sessions/{session_id}")
+async def get_tutor_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get single session conversation history."""
+    clerk_id = current_user["clerk_user_id"]
+    session = await crud.get_tutor_session(db, session_id, clerk_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tutor session not found."
+        )
+    return session
+
+@app.post("/api/tutor/chat")
+async def socratic_tutor_chat(
+    req: TutorChatRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Real-time interactive Socratic dialogue grounded in knowledge graph & source chunks.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Retrieve or Create Session
+    session = None
+    if req.session_id:
+        session = await crud.get_tutor_session(db, req.session_id, clerk_id)
+        
+    concept_name = req.concept_name
+    concept_id = req.concept_id
+    
+    if not session:
+        # Resolve concept name if only ID provided
+        if concept_id and not concept_name:
+            c = await crud.get_concept(db, concept_id, clerk_id)
+            if c:
+                concept_name = c.get("name")
+                
+        title = f"Tutoring: {concept_name or 'General Curriculum'}"
+        new_session = TutorSession(
+            clerk_user_id=clerk_id,
+            concept_id=concept_id,
+            concept_name=concept_name,
+            session_title=title,
+            messages=[]
+        )
+        session = await crud.create_tutor_session(db, new_session)
+        
+    session_id = str(session["_id"])
+    
+    # 2. Append User Message to DB
+    user_msg = TutorChatMessage(
+        role="user",
+        content=req.message,
+        concept_references=[concept_name] if concept_name else []
+    )
+    await crud.append_tutor_message(db, session_id, clerk_id, user_msg)
+    
+    # 3. Retrieve Grounding Material Chunks for Concept
+    context_chunks = []
+    if concept_id or concept_name:
+        concepts = await crud.get_concepts(db, clerk_id)
+        matched = next((c for c in concepts if str(c.get("_id")) == concept_id or c.get("name") == concept_name), None)
+        if matched and matched.get("material_id"):
+            m_chunks = await crud.get_material_chunks(db, matched["material_id"])
+            context_chunks = [ch.get("text", "") for ch in m_chunks if ch.get("text")]
+            
+    # 4. Determine Learner Mastery State
+    mastery_cat = "Learning"
+    if concept_id:
+        m = await crud.get_mastery_by_concept(db, concept_id, clerk_id)
+        if m:
+            mastery_cat = m.get("category", "Learning")
+
+    # 5. Format conversation history for LLM
+    all_msgs = session.get("messages", []) + [user_msg.model_dump()]
+    llm_history = [{"role": m["role"], "content": m["content"]} for m in all_msgs[-8:]]
+    
+    # 6. Call Socratic AI Service
+    ai_reply_text = await AIService.socratic_chat(
+        messages=llm_history,
+        concept_name=concept_name,
+        context_chunks=context_chunks,
+        tutor_mode=req.tutor_mode,
+        mastery_category=mastery_cat
+    )
+    
+    # 7. Append Assistant Message
+    assistant_msg = TutorChatMessage(
+        role="assistant",
+        content=ai_reply_text,
+        concept_references=[concept_name] if concept_name else []
+    )
+    updated_session = await crud.append_tutor_message(db, session_id, clerk_id, assistant_msg)
+    
+    # 8. Award Gamification XP (+5 XP for active inquiry)
+    try:
+        await GamificationService.award_xp(
+            db=db,
+            clerk_user_id=clerk_id,
+            action="tutor_chat",
+            metadata={"concept_name": concept_name}
+        )
+    except Exception as e:
+        logger.warning(f"XP award for tutor chat failed: {e}")
+
+    return {
+        "session_id": session_id,
+        "reply": ai_reply_text,
+        "message": assistant_msg.model_dump(),
+        "concept_name": concept_name
+    }
+
+@app.delete("/api/tutor/sessions/{session_id}")
+async def delete_tutor_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete a tutor conversation session."""
+    clerk_id = current_user["clerk_user_id"]
+    deleted = await crud.delete_tutor_session(db, session_id, clerk_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tutor session not found or not owned by user."
+        )
+    return {"success": True, "deleted_id": session_id}
+
 
 
 

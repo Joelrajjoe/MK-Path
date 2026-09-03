@@ -8,7 +8,7 @@ import {
   GitBranch, 
   GraduationCap, 
   Compass, 
-  Sparkles,
+  Sparkles, 
   Award, 
   Settings as SettingsIcon, 
   Accessibility as AccessibilityIcon,
@@ -20,7 +20,8 @@ import {
   ClipboardList,
   User,
   Layers,
-  Download
+  Download,
+  Bot
 } from 'lucide-react'
 
 export default function Layout() {
@@ -61,6 +62,7 @@ export default function Layout() {
       case '/knowledge-graph': return 'Interactive Knowledge Graph'
       case '/flashcards': return 'Spaced-Repetition Flashcards'
       case '/study-notes': return 'AI Study Notes & Mind-Maps'
+      case '/tutor': return 'AI Socratic Concept Tutor'
       case '/assessment': return 'Adaptive Assessment'
       case '/study-path': return 'Personalized Study Path'
       case '/resources': return 'Recommended Resources'
@@ -80,6 +82,7 @@ export default function Layout() {
     { to: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
     { to: '/materials', label: 'Materials', icon: <FileText size={18} /> },
     { to: '/knowledge-graph', label: 'Knowledge Graph', icon: <GitBranch size={18} /> },
+    { to: '/tutor', label: 'AI Tutor', icon: <Bot size={18} /> },
     { to: '/flashcards', label: 'Flashcards', icon: <Layers size={18} /> },
     { to: '/study-notes', label: 'Study Notes', icon: <BookOpen size={18} /> },
     { to: '/assessment', label: 'Assessment', icon: <GraduationCap size={18} /> },

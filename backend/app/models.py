@@ -337,3 +337,33 @@ class GenerateStudyNotesRequest(BaseModel):
     material_id: Optional[str] = None
     depth: str = Field("comprehensive", description="concise or comprehensive")
 
+
+class TutorChatMessage(BaseModel):
+    id: str = Field(default_factory=lambda: str(datetime.utcnow().timestamp()))
+    role: str = Field(..., description="user, assistant, or system")
+    content: str
+    concept_references: List[str] = Field(default_factory=list)
+    source_chunk_ids: List[str] = Field(default_factory=list)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TutorSession(BaseModel):
+    """Conversational Socratic tutoring session grounded in user concepts & chunks."""
+    clerk_user_id: str
+    concept_id: Optional[str] = None
+    concept_name: Optional[str] = None
+    session_title: str = Field("Socratic Tutoring Session")
+    messages: List[TutorChatMessage] = Field(default_factory=list)
+    learning_goals: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TutorChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    concept_id: Optional[str] = None
+    concept_name: Optional[str] = None
+    message: str
+    tutor_mode: str = Field("socratic", description="socratic (guided inquiry), direct_explainer, or exam_coach")
+
+

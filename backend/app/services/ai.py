@@ -249,6 +249,50 @@ class GeminiProvider(AIProvider):
         data = json.loads(raw_res)
         return data.get("notes", [])
 
+    async def socratic_chat(
+        self,
+        messages: List[Dict[str, str]],
+        concept_name: Optional[str] = None,
+        context_chunks: List[str] = None,
+        tutor_mode: str = "socratic",
+        mastery_category: str = "Learning"
+    ) -> str:
+        """Interactive 1-on-1 Socratic AI tutoring grounded in retrieved chunks & concept."""
+        context_block = ""
+        if context_chunks:
+            context_block = "\n\nGrounding Knowledge Base:\n" + "\n---\n".join(context_chunks[:6])
+            
+        system_instructions = (
+            "You are MK-Path's elite Socratic AI Tutor & Concept Guide. "
+            f"You are tutoring a student on the subject/concept: '{concept_name or 'General Curriculum'}'. "
+            f"The learner's current mastery state is: {mastery_category}.\n"
+            f"Tutor Mode: {tutor_mode.upper()}.\n\n"
+            "Pedagogical Guidelines:\n"
+            "1. If mode is SOCRATIC: Guide the student through thoughtful questions, leading hints, analogies, and active inquiry rather than giving direct answers immediately.\n"
+            "2. If mode is DIRECT_EXPLAINER: Deliver crystal-clear explanations with analogies, code snippets, and structural breakdowns.\n"
+            "3. If mode is EXAM_COACH: Challenge the student with rapid test scenarios, edge cases, and misconception diagnosis.\n"
+            "4. Ground all explanations strictly in the uploaded curriculum context whenever available.\n"
+            "5. Use Markdown formatting (bold keywords, bullet lists, code fences) for high legibility."
+            f"{context_block}"
+        )
+
+        conversation_history = "\n".join([
+            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            for m in messages
+        ])
+
+        full_prompt = f"{system_instructions}\n\n--- Conversation History ---\n{conversation_history}\n\nAssistant:"
+
+        response = await asyncio.to_thread(
+            self.client.models.generate_content,
+            model=self.model_name,
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3
+            )
+        )
+        return response.text or "I'm ready to guide your inquiry. What concept would you like to explore?"
+
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         response = await asyncio.to_thread(
             self.client.models.embed_content,
@@ -482,6 +526,57 @@ class GroqProvider(AIProvider):
         else:
             raise Exception(f"Groq Study Notes API error: {response.status_code} - {response.text}")
 
+    async def socratic_chat(
+        self,
+        messages: List[Dict[str, str]],
+        concept_name: Optional[str] = None,
+        context_chunks: List[str] = None,
+        tutor_mode: str = "socratic",
+        mastery_category: str = "Learning"
+    ) -> str:
+        context_block = ""
+        if context_chunks:
+            context_block = "\n\nGrounding Context:\n" + "\n---\n".join(context_chunks[:6])
+
+        system_msg = (
+            "You are MK-Path's Socratic AI Tutor & Concept Guide. "
+            f"Concept target: '{concept_name or 'General Curriculum'}'. Mode: {tutor_mode}. "
+            "Guide the student thoughtfully, test their understanding with interactive inquiries, and ground explanations in their study materials."
+            f"{context_block}"
+        )
+
+        groq_messages = [{"role": "system", "content": system_msg}]
+        for m in messages:
+            groq_messages.append({
+                "role": m.get("role", "user"),
+                "content": m.get("content", "")
+            })
+
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages": groq_messages,
+            "temperature": 0.3
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        response = await asyncio.to_thread(
+            requests.post,
+            "https://api.groq.com/openai/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=20
+        )
+
+        if response.status_code == 200:
+            res_json = response.json()
+            return res_json["choices"][0]["message"]["content"]
+        else:
+            raise Exception(f"Groq Tutor API error: {response.status_code} - {response.text}")
+
 
 class LocalFallbackProvider(AIProvider):
     async def extract_concepts_and_relationships(self, text: str) -> Dict[str, Any]:
@@ -501,6 +596,19 @@ class LocalFallbackProvider(AIProvider):
                 "difficulty": c.get("difficulty", "basic")
             })
         return cards
+
+    async def socratic_chat(
+        self,
+        messages: List[Dict[str, str]],
+        concept_name: Optional[str] = None,
+        context_chunks: List[str] = None,
+        tutor_mode: str = "socratic",
+        mastery_category: str = "Learning"
+    ) -> str:
+        return (
+            f"Hello! I am your MK-Path Socratic Tutor for **{concept_name or 'your curriculum'}**. "
+            "To test your foundational understanding: How would you describe the core objective of this concept in your own words?"
+        )
 
     async def generate_study_notes(self, concepts: List[Dict[str, Any]], depth: str = "comprehensive", context_chunks: List[str] = None) -> List[Dict[str, Any]]:
         notes = []
@@ -1014,6 +1122,121 @@ class AIService:
         except Exception as e:
             logger.error(f"Local study notes fallback failed: {e}")
             return []
+
+    @classmethod
+    async def socratic_chat(
+        cls,
+        messages: List[Dict[str, str]],
+        concept_name: Optional[str] = None,
+        context_chunks: List[str] = None,
+        tutor_mode: str = "socratic",
+        mastery_category: str = "Learning"
+    ) -> str:
+        """
+        Orchestrates 1-on-1 Socratic conversational tutoring.
+        Cycles through Gemini -> Groq -> Local fallback.
+        """
+        gemini_keys = settings.GEMINI_API_KEYS
+        gemini_model = settings.GEMINI_MODEL or "gemini-3.5-flash"
+        
+        # Stage 1: Gemini
+        if gemini_keys:
+            for idx, key in enumerate(gemini_keys):
+                start_time = time.perf_counter()
+                provider = "Gemini"
+                model_name = gemini_model
+                success = False
+                error_category = "None"
+                
+                try:
+                    provider_obj = GeminiProvider(api_key=key, model_name=model_name)
+                    response_text = await provider_obj.socratic_chat(
+                        messages=messages,
+                        concept_name=concept_name,
+                        context_chunks=context_chunks,
+                        tutor_mode=tutor_mode,
+                        mastery_category=mastery_category
+                    )
+                    success = True
+                    cls._log_observability(
+                        operation="socratic_chat",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=False,
+                        error_category=error_category
+                    )
+                    return response_text
+                except Exception as e:
+                    success = False
+                    error_category = cls._categorize_error(e)
+                    cls._log_observability(
+                        operation="socratic_chat",
+                        provider=provider,
+                        model=model_name,
+                        success=success,
+                        latency=time.perf_counter() - start_time,
+                        fallback_used=True,
+                        error_category=error_category
+                    )
+                    logger.error(f"Gemini Socratic Chat failed (Key {idx+1}/{len(gemini_keys)}): {e}")
+
+        # Stage 2: Groq Fallback
+        if settings.GROQ_API_KEY:
+            start_time = time.perf_counter()
+            provider = "Groq"
+            model_name = "openai/gpt-oss-120b"
+            success = False
+            error_category = "None"
+            
+            try:
+                provider_obj = GroqProvider(api_key=settings.GROQ_API_KEY)
+                response_text = await provider_obj.socratic_chat(
+                    messages=messages,
+                    concept_name=concept_name,
+                    context_chunks=context_chunks,
+                    tutor_mode=tutor_mode,
+                    mastery_category=mastery_category
+                )
+                success = True
+                cls._log_observability(
+                    operation="socratic_chat",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                return response_text
+            except Exception as e:
+                success = False
+                error_category = cls._categorize_error(e)
+                cls._log_observability(
+                    operation="socratic_chat",
+                    provider=provider,
+                    model=model_name,
+                    success=success,
+                    latency=time.perf_counter() - start_time,
+                    fallback_used=True,
+                    error_category=error_category
+                )
+                logger.error(f"Groq Socratic Chat fallback failed: {e}")
+
+        # Stage 3: Local Fallback
+        try:
+            provider_obj = LocalFallbackProvider()
+            return await provider_obj.socratic_chat(
+                messages=messages,
+                concept_name=concept_name,
+                context_chunks=context_chunks,
+                tutor_mode=tutor_mode,
+                mastery_category=mastery_category
+            )
+        except Exception as e:
+            logger.error(f"Local Socratic chat fallback failed: {e}")
+            return f"Let's focus on **{concept_name or 'your topic'}**. How can I help clarify this concept?"
 
     @classmethod
     async def generate_embeddings(cls, texts: List[str]) -> List[List[float]]:
