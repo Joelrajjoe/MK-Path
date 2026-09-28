@@ -48,31 +48,35 @@ Gamification (XP Logs, Level Ranks, and Achievements)
 *   **Misconception & Prerequisite Diagnosis**: Deterministic diagnosis engine identifying root misconception causes, decay rates, and BKT uncertainty.
 *   **Trust-Aware Resource Recommendations**: Dynamically matched educational guides and verified documentation (DevDocs, interactive sandboxes) tailored to weak concepts.
 *   **Cascade & Bulk Data Management**: Safe, user-scoped data purging with cascade deletions and bulk "Delete All" controls for materials, flashcards, notes, podcasts, tutor sessions, and assignments.
+*   **Cross-Platform React Native Mobile Client**: Native iOS and Android application built with Expo and TypeScript, providing on-the-go access to goal readiness tracking, What-If counterfactual simulations, misconception diagnoses, adaptive assessments, knowledge graph inspection, and assignment completion.
 
 ---
 
 ## 3. System Architecture
 
-The following block diagram represents the application components and data flow:
+The following block diagram represents the application components and unified backend data flow across web and mobile clients:
 
 ```mermaid
 graph TD
-    Client["React / Vite App (Tailwind CSS v4)"]
-    Auth["Clerk JS SDK (Frontend Authentication)"]
-    Gateway["FastAPI API Server"]
+    Web["React / Vite Web App"]
+    Mobile["React Native / Expo Mobile App"]
+    Auth["Clerk Authentication (RS256 JWT)"]
+    Gateway["FastAPI API Server (Port 8000)"]
     Verify["JWKS Local Token Decoder"]
-    Service["Concept & MCQ Generator Service"]
-    PyMuPDF["PyMuPDF Document Parser"]
+    Intelligence["Learner Intelligence Engines (NBA / Diagnosis / Simulator)"]
+    RAG["RAG Ingestion & Vector Search"]
     Atlas["MongoDB Atlas Cloud Database"]
     AI["Google Gemini / Groq APIs"]
 
-    Client -->|1. Sign Up / Sign In| Auth
-    Client -->|2. Send Authorized HTTP Requests| Gateway
-    Gateway -->|3. Decrypt RS256 JWT Session| Verify
-    Gateway -->|4. Parse Ingested PDF bytes| PyMuPDF
-    Gateway -->|5. Extract Concepts / MCQs| Service
-    Service -->|6. Call AI Endpoints (Fallback Sequence)| AI
-    Gateway -->|7. Persist User-Scoped Collections| Atlas
+    Web -->|1. Authenticate| Auth
+    Mobile -->|1. Authenticate| Auth
+    Web -->|2. Authorized REST Calls| Gateway
+    Mobile -->|2. Authorized REST Calls| Gateway
+    Gateway -->|3. Validate Token| Verify
+    Gateway -->|4. Business & Diagnostic Logic| Intelligence
+    Gateway -->|5. Multimodal Embedding & Search| RAG
+    RAG -->|6. Grounded Context| AI
+    Gateway -->|7. Multi-Tenant User Isolation| Atlas
 ```
 
 ---
