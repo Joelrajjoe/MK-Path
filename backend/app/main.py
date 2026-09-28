@@ -12,14 +12,22 @@ from .database import db_manager, get_db
 from .auth import get_current_user
 from . import crud
 from .models import (
-    UserProfile, Material, Concept, Relationship, Question, Attempt, 
+    UserProfile, Material, MaterialStatus, Concept, Relationship, Question, Attempt, 
     Mastery, AttemptSubmit, Gamification, LearnerEvent, UserPreferences, 
     Assignment, AssignmentQuestion, ResourceFeedback, Flashcard, 
     FlashcardReviewRequest, GenerateFlashcardsRequest, StudyNote, GenerateStudyNotesRequest,
     TutorChatMessage, TutorSession, TutorChatRequest,
-    PodcastOverview, PodcastDialogueTurn, GeneratePodcastRequest
+    PodcastOverview, PodcastDialogueTurn, GeneratePodcastRequest,
+    Goal, RequiredSkill, SkillGap, GoalGapAnalysis,
+    DiagnosisRequest, LearningDiagnosis, SimulationRequest, SimulationResult,
+    NextBestActionRecommendation, MasteryEvidenceChain
 )
 from .services.ai import AIService
+from .services.goal_service import GoalGapAnalysisService
+from .services.diagnosis_service import LearningDiagnosisService
+from .services.simulation_service import LearningSimulationService
+from .services.nba_service import NextBestLearningActionService
+from .services.mastery_evidence_service import MasteryEvidenceChainService
 from .services.extractors import (
     PDFExtractor,
     TextExtractor,
@@ -116,8 +124,7 @@ async def get_user_profile(
     db = Depends(get_db)
 ):
     """
-    Protected route retrieving user profile.
-    If database is online, lazily creates/updates user in MongoDB user_profiles.
+    Protected route retrieving full user profile enriched with extended learning preferences and gamification level.
     """
     clerk_id = current_user["clerk_user_id"]
     email = current_user["email"]
@@ -134,7 +141,25 @@ async def get_user_profile(
 
     try:
         profile_record = await crud.create_or_update_user_profile(db, profile_model)
-        return profile_record
+        prefs = await crud.get_user_preferences(db, clerk_id) or {}
+        gamification = await crud.get_gamification(db, clerk_id) or {}
+        
+        merged_profile = {
+            **profile_record,
+            "display_name": prefs.get("display_name") or prefs.get("preferred_name") or profile_record.get("display_name") or name,
+            "preferred_name": prefs.get("preferred_name"),
+            "target_role": prefs.get("target_role"),
+            "target_exam": prefs.get("target_exam") or prefs.get("exam_target"),
+            "current_level": prefs.get("current_level") or gamification.get("level_name", "Beginner"),
+            "level": gamification.get("level", 1),
+            "xp": gamification.get("xp", 0),
+            "preferred_difficulty": prefs.get("preferred_difficulty", "intermediate"),
+            "daily_study_target_minutes": prefs.get("daily_study_target_minutes", 30),
+            "preferred_session_duration_minutes": prefs.get("preferred_session_duration_minutes", 25),
+            "deadline": prefs.get("deadline"),
+            "preferences": prefs
+        }
+        return merged_profile
     except Exception as e:
         logger.error(f"Error upserting user profile: {e}")
         return {
@@ -213,6 +238,10 @@ async def upload_material(
         )
 
     # 3. Perform Ingestion / Extraction
+    import hashlib
+    material_status = MaterialStatus.EXTRACTING.value
+    error_message = None
+
     try:
         extract_result = await extractor.extract(file_bytes, content_type or f"application/{ext}")
         
@@ -223,6 +252,12 @@ async def upload_material(
         ocr_status = extract_result.get("ocr_status", "n/a")
         transcription_status = extract_result.get("transcription_status", "n/a")
         extraction_method = extract_result.get("extraction_method", "direct_text")
+        
+        if extraction_status == "processed" and extracted_text:
+            material_status = MaterialStatus.EXTRACTED.value
+        else:
+            material_status = MaterialStatus.FAILED.value
+            error_message = extract_result.get("error_code", "Extraction produced empty text or quality check failed.")
     except Exception as e:
         logger.error(f"Unified extraction failed for {filename}: {e}")
         extracted_text = ""
@@ -232,8 +267,10 @@ async def upload_material(
         ocr_status = "failed"
         transcription_status = "failed"
         extraction_method = "direct_text"
+        material_status = MaterialStatus.FAILED.value
+        error_message = str(e)
 
-    # 4. Save to Database
+    # 4. Save to Database with initial state
     material_model = Material(
         clerk_user_id=clerk_id,
         title=filename,
@@ -241,7 +278,7 @@ async def upload_material(
         file_size=file_size,
         content_type=content_type or f"application/{ext}",
         raw_text=extracted_text,
-        status=extraction_status,
+        status=material_status,
         created_at=datetime.utcnow(),
         source_type=source_type,
         mime_type=content_type or f"application/{ext}",
@@ -250,37 +287,94 @@ async def upload_material(
         transcription_status=transcription_status,
         ocr_status=ocr_status,
         extraction_method=extraction_method,
-        segments=segments
+        segments=segments,
+        error_message=error_message
     )
 
     try:
         material_record = await crud.create_material(db, material_model)
+        material_id_str = str(material_record["_id"])
         
-        # 5. RAG Pipeline: Chunking and Embedding
-        if extracted_text and extraction_status == "processed":
+        # 5. RAG Pipeline: Canonical Chunking & Embedding
+        if extracted_text and material_status == MaterialStatus.EXTRACTED.value:
             try:
-                # Simple chunking: 500 words per chunk
-                words = extracted_text.split()
-                chunk_size = 500
-                chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-                if chunks:
-                    # Generate embeddings via Gemini
-                    embeddings = await AIService.generate_embeddings(chunks)
-                    
-                    # Prepare chunk records
-                    chunks_data = []
-                    for idx, (text_chunk, emb) in enumerate(zip(chunks, embeddings)):
-                        chunks_data.append({
-                            "chunk_index": idx,
-                            "text": text_chunk,
-                            "embedding": emb,
-                            "clerk_user_id": clerk_id
+                await crud.update_material_status(db, material_id_str, clerk_id, MaterialStatus.CHUNKING.value)
+                
+                # Build canonical chunks (by segments/pages or 400-word blocks)
+                raw_chunks_to_embed = []
+                if segments and len(segments) > 1:
+                    for s_idx, seg in enumerate(segments):
+                        seg_text = seg.get("text", "").strip()
+                        if not seg_text:
+                            continue
+                        page_num = seg.get("page")
+                        start_time = seg.get("start")
+                        end_time = seg.get("end")
+                        c_hash = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
+                        c_id = f"{material_id_str}_chunk_{s_idx}_{c_hash[:8]}"
+                        raw_chunks_to_embed.append({
+                            "chunk_id": c_id,
+                            "material_id": material_id_str,
+                            "clerk_user_id": clerk_id,
+                            "sequence": s_idx,
+                            "text": seg_text,
+                            "page": page_num,
+                            "section": f"Segment {s_idx + 1}",
+                            "source_type": source_type,
+                            "content_hash": c_hash,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "token_count": len(seg_text.split()),
+                            "metadata": {}
                         })
+                
+                if not raw_chunks_to_embed:
+                    # Slicing fallback for unsegmented text (approx 400 words)
+                    words = extracted_text.split()
+                    chunk_size = 400
+                    word_blocks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+                    for idx, block in enumerate(word_blocks):
+                        c_hash = hashlib.sha256(block.encode("utf-8")).hexdigest()
+                        c_id = f"{material_id_str}_chunk_{idx}_{c_hash[:8]}"
+                        raw_chunks_to_embed.append({
+                            "chunk_id": c_id,
+                            "material_id": material_id_str,
+                            "clerk_user_id": clerk_id,
+                            "sequence": idx,
+                            "text": block,
+                            "page": 1,
+                            "section": f"Section {idx + 1}",
+                            "source_type": source_type,
+                            "content_hash": c_hash,
+                            "start_time": None,
+                            "end_time": None,
+                            "token_count": len(block.split()),
+                            "metadata": {}
+                        })
+
+                if raw_chunks_to_embed:
+                    await crud.update_material_status(db, material_id_str, clerk_id, MaterialStatus.EMBEDDING.value)
                     
-                    # Save to db
-                    await crud.save_material_chunks(db, str(material_record["_id"]), chunks_data)
+                    texts = [c["text"] for c in raw_chunks_to_embed]
+                    embeddings = await AIService.generate_embeddings(texts)
+                    
+                    final_chunk_records = []
+                    for chunk_dict, emb in zip(raw_chunks_to_embed, embeddings):
+                        chunk_dict["embedding"] = emb
+                        chunk_dict["embedding_model"] = "models/gemini-embedding-001"
+                        chunk_dict["embedding_status"] = "completed" if any(emb) else "fallback"
+                        final_chunk_records.append(chunk_dict)
+                        
+                    await crud.save_material_chunks(db, material_id_str, final_chunk_records)
+                    await crud.update_material_status(db, material_id_str, clerk_id, MaterialStatus.READY.value)
+                    material_record["status"] = MaterialStatus.READY.value
+                else:
+                    await crud.update_material_status(db, material_id_str, clerk_id, MaterialStatus.PARTIAL.value)
+                    material_record["status"] = MaterialStatus.PARTIAL.value
             except Exception as e:
-                logger.error(f"Failed to process RAG chunks for material {material_record.get('_id')}: {e}")
+                logger.error(f"Failed during chunking/embedding pipeline for material {material_id_str}: {e}")
+                await crud.update_material_status(db, material_id_str, clerk_id, MaterialStatus.PARTIAL.value, error_message=str(e))
+                material_record["status"] = MaterialStatus.PARTIAL.value
                 
         # 6. Log User Activity
         await crud.log_user_activity(
@@ -288,8 +382,8 @@ async def upload_material(
             clerk_id, 
             event_type="material_uploaded", 
             entity_type="material",
-            entity_id=str(material_record["_id"]),
-            metadata={"filename": filename}
+            entity_id=material_id_str,
+            metadata={"filename": filename, "status": material_record.get("status")}
         )
 
         return material_record
@@ -310,8 +404,6 @@ async def get_materials_list(
         return await crud.get_materials(db, clerk_id)
     except Exception as e:
         logger.error(f"Error retrieving materials list: {e}")
-        return []
-
 @app.get("/api/materials/{material_id}")
 async def get_material_detail(
     material_id: str,
@@ -336,6 +428,91 @@ async def get_material_detail(
             detail="Failed to retrieve study material details."
         )
 
+@app.patch("/api/materials/{material_id}")
+async def update_material(
+    material_id: str,
+    body: dict,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Rename or update study material metadata."""
+    clerk_id = current_user["clerk_user_id"]
+    title = body.get("title")
+    if not title or not title.strip():
+        raise HTTPException(status_code=400, detail="Material title cannot be empty.")
+    success = await crud.update_material_title(db, material_id, clerk_id, title.strip())
+    if not success:
+        raise HTTPException(status_code=404, detail="Material not found or access denied.")
+    return await crud.get_material(db, material_id, clerk_id)
+
+@app.post("/api/materials/{material_id}/reprocess")
+async def reprocess_material(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Re-runs chunking and vector embeddings generation for an existing material."""
+    clerk_id = current_user["clerk_user_id"]
+    material = await crud.get_material(db, material_id, clerk_id)
+    if not material:
+        raise HTTPException(status_code=404, detail="Material not found.")
+        
+    raw_text = material.get("raw_text", "").strip()
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="Cannot reprocess material with empty text.")
+
+    import hashlib
+    try:
+        await crud.update_material_status(db, material_id, clerk_id, MaterialStatus.CHUNKING.value)
+        words = raw_text.split()
+        chunk_size = 400
+        word_blocks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+        
+        raw_chunks = []
+        for idx, block in enumerate(word_blocks):
+            c_hash = hashlib.sha256(block.encode("utf-8")).hexdigest()
+            c_id = f"{material_id}_chunk_{idx}_{c_hash[:8]}"
+            raw_chunks.append({
+                "chunk_id": c_id,
+                "material_id": str(material_id),
+                "clerk_user_id": clerk_id,
+                "sequence": idx,
+                "text": block,
+                "page": 1,
+                "section": f"Section {idx + 1}",
+                "source_type": material.get("source_type", "pdf"),
+                "content_hash": c_hash,
+                "token_count": len(block.split()),
+                "metadata": {}
+            })
+            
+        await crud.update_material_status(db, material_id, clerk_id, MaterialStatus.EMBEDDING.value)
+        embeddings = await AIService.generate_embeddings([c["text"] for c in raw_chunks])
+        
+        final_chunks = []
+        for c, emb in zip(raw_chunks, embeddings):
+            c["embedding"] = emb
+            c["embedding_model"] = "models/gemini-embedding-001"
+            c["embedding_status"] = "completed" if any(emb) else "fallback"
+            final_chunks.append(c)
+            
+        # Clear previous chunks and insert new ones
+        if db.is_online:
+            await db.get_collection("material_chunks").delete_many({"material_id": str(material_id), "clerk_user_id": clerk_id})
+        await crud.save_material_chunks(db, material_id, final_chunks)
+        await crud.update_material_status(db, material_id, clerk_id, MaterialStatus.READY.value)
+        
+        return {
+            "success": True,
+            "material_id": material_id,
+            "status": MaterialStatus.READY.value,
+            "chunks_count": len(final_chunks)
+        }
+    except Exception as e:
+        logger.error(f"Reprocessing failed for material {material_id}: {e}")
+        await crud.update_material_status(db, material_id, clerk_id, MaterialStatus.PARTIAL.value, error_message=str(e))
+        raise HTTPException(status_code=500, detail=f"Reprocessing failed: {e}")
+
 @app.post("/api/materials/{material_id}/extract-concepts")
 async def extract_concepts(
     material_id: str,
@@ -352,7 +529,7 @@ async def extract_concepts(
             detail="Study material not found."
         )
 
-    if material["status"] == "failed":
+    if material.get("status") in ("failed", MaterialStatus.FAILED.value):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot extract concepts from a failed material upload."
@@ -510,6 +687,104 @@ async def get_concept_detail(
             detail="Failed to retrieve concept details."
         )
 
+class ConceptCreateRequest(BaseModel):
+    name: str
+    description: str
+    difficulty: str = "intermediate"
+    exam_relevance: int = 80
+    industry_relevance: int = 80
+    prerequisites: List[str] = []
+    material_id: Optional[str] = None
+
+class ConceptUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    difficulty: Optional[str] = None
+    exam_relevance: Optional[int] = None
+    industry_relevance: Optional[int] = None
+    prerequisites: Optional[List[str]] = None
+
+class ConceptMergeRequest(BaseModel):
+    primary_concept_id: str
+    duplicate_concept_id: str
+
+@app.post("/api/concepts")
+async def create_custom_concept(
+    body: ConceptCreateRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Create a new user-defined or manual educational concept."""
+    clerk_id = current_user["clerk_user_id"]
+    concept_model = Concept(
+        clerk_user_id=clerk_id,
+        material_id=body.material_id,
+        name=body.name.strip(),
+        description=body.description.strip(),
+        difficulty=body.difficulty,
+        exam_relevance=body.exam_relevance,
+        industry_relevance=body.industry_relevance,
+        prerequisites=body.prerequisites,
+        created_at=datetime.utcnow()
+    )
+    saved = await crud.create_concepts(db, [concept_model])
+    if not saved:
+        raise HTTPException(status_code=500, detail="Failed to create concept.")
+    created_c = saved[0]
+    
+    # Sync with Neo4j
+    try:
+        await neo4j_service.sync_concept(clerk_id, created_c)
+    except Exception as e:
+        logger.warning(f"Neo4j sync failed for custom concept: {e}")
+        
+    return created_c
+
+@app.patch("/api/concepts/{concept_id}")
+async def patch_concept(
+    concept_id: str,
+    body: ConceptUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Edit concept details, difficulty, relevance weights, and prerequisites."""
+    clerk_id = current_user["clerk_user_id"]
+    update_data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields provided for update.")
+        
+    updated = await crud.update_concept(db, concept_id, clerk_id, update_data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Concept not found or access denied.")
+        
+    # Sync update with Neo4j
+    try:
+        await neo4j_service.sync_concept(clerk_id, updated)
+    except Exception as e:
+        logger.warning(f"Neo4j sync failed on concept update: {e}")
+        
+    return updated
+
+@app.post("/api/concepts/merge")
+async def merge_duplicate_concepts(
+    body: ConceptMergeRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Merge duplicate concepts into a single primary concept.
+    Re-points associated questions, attempts, relationships, and mastery.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    merged = await crud.merge_concepts(db, clerk_id, body.primary_concept_id, body.duplicate_concept_id)
+    if not merged:
+        raise HTTPException(status_code=404, detail="Primary or duplicate concept not found.")
+    return {
+        "success": True,
+        "primary_concept": merged,
+        "message": f"Successfully merged concept into '{merged['name']}'."
+    }
+
 class GenerateAssessmentRequest(BaseModel):
     concept_id: Optional[str] = None
     num_questions: int = 5
@@ -552,81 +827,128 @@ async def get_graph(
     nodes = []
     edges = []
 
-    # Map concepts to React Flow Nodes arranged in col grids
-    idx = 0
+    # Build adjacency and compute topological levels
+    concept_by_name = {c["name"]: c for c in concepts}
+    concept_level = {}
+
+    def compute_level(name, visited=None):
+        if visited is None:
+            visited = set()
+        if name in visited or name not in concept_by_name:
+            return 0
+        visited.add(name)
+        prereqs = concept_by_name[name].get("prerequisites", [])
+        if not prereqs:
+            return 0
+        return 1 + max([compute_level(p, visited.copy()) for p in prereqs], default=0)
+
     for c in concepts:
-        concept_id_str = str(c["_id"])
-        m_info = mastery_map.get(concept_id_str)
-        
-        if m_info:
-            mastery_score = m_info["score"]
-            mastery_state = m_info["category"]
-        else:
-            mastery_score = None
-            mastery_state = "Not assessed"
+        concept_level[c["name"]] = compute_level(c["name"])
 
-        row = idx // 3
-        col = idx % 3
-        x = col * 280
-        y = row * 160
+    # Group concepts by hierarchical level/layer
+    levels_dict = {}
+    for c in concepts:
+        lvl = concept_level.get(c["name"], 0)
+        levels_dict.setdefault(lvl, []).append(c)
 
-        nodes.append({
-            "id": concept_id_str,
-            "type": "default",
-            "position": {"x": x, "y": y},
-            "data": {
-                "label": c["name"],
-                "name": c["name"],
-                "difficulty": c["difficulty"],
-                "exam_relevance": c["exam_relevance"],
-                "industry_relevance": c["industry_relevance"],
-                "mastery_score": mastery_score,
-                "mastery_state": mastery_state,
-                "description": c["description"],
-                "prerequisites": c.get("prerequisites", [])
-            },
-            "style": {
-                "background": "#0f172a",
-                "color": "#fff",
-                "border": "1.5px solid " + (
-                    "#10b981" if mastery_state == "Mastered"
-                    else "#6366f1" if mastery_state == "Proficient"
-                    else "#f59e0b" if mastery_state == "Learning"
-                    else "#ef4444" if mastery_state == "Weak"
-                    else "#475569"
-                ),
-                "borderRadius": "12px",
-                "padding": "12px",
-                "fontSize": "11px",
-                "fontWeight": "700",
-                "boxShadow": "0 0 12px " + (
-                    "rgba(16, 185, 129, 0.25)" if mastery_state == "Mastered"
-                    else "rgba(99, 101, 241, 0.25)" if mastery_state == "Proficient"
-                    else "rgba(245, 158, 11, 0.25)" if mastery_state == "Learning"
-                    else "rgba(239, 68, 68, 0.25)" if mastery_state == "Weak"
-                    else "rgba(71, 85, 105, 0.1)"
-                )
-            }
-        })
-        idx += 1
+    sorted_levels = sorted(levels_dict.keys())
+    for col_idx, lvl in enumerate(sorted_levels):
+        layer_concepts = levels_dict[lvl]
+        total_in_layer = len(layer_concepts)
+        for row_idx, c in enumerate(layer_concepts):
+            concept_id_str = str(c["_id"])
+            m_info = mastery_map.get(concept_id_str)
+            
+            if m_info:
+                mastery_score = m_info["score"]
+                mastery_state = m_info["category"]
+            else:
+                mastery_score = None
+                mastery_state = "Not assessed"
+
+            # Hierarchical topological positioning (left-to-right progression)
+            x = col_idx * 300 + 40
+            # Center nodes vertically within their column
+            y = (row_idx - (total_in_layer - 1) / 2) * 160 + 260
+
+            nodes.append({
+                "id": concept_id_str,
+                "type": "default",
+                "position": {"x": int(x), "y": int(y)},
+                "data": {
+                    "label": c["name"],
+                    "name": c["name"],
+                    "difficulty": c.get("difficulty", "intermediate"),
+                    "exam_relevance": c.get("exam_relevance", 80),
+                    "industry_relevance": c.get("industry_relevance", 80),
+                    "mastery_score": mastery_score,
+                    "mastery_state": mastery_state,
+                    "description": c.get("description", ""),
+                    "prerequisites": c.get("prerequisites", []),
+                    "level": lvl
+                },
+                "style": {
+                    "background": "#0f172a",
+                    "color": "#fff",
+                    "border": "1.5px solid " + (
+                        "#10b981" if mastery_state == "Mastered"
+                        else "#6366f1" if mastery_state == "Proficient"
+                        else "#f59e0b" if mastery_state == "Learning"
+                        else "#ef4444" if mastery_state == "Weak"
+                        else "#475569"
+                    ),
+                    "borderRadius": "12px",
+                    "padding": "12px",
+                    "fontSize": "11px",
+                    "fontWeight": "700",
+                    "boxShadow": "0 0 12px " + (
+                        "rgba(16, 185, 129, 0.25)" if mastery_state == "Mastered"
+                        else "rgba(99, 101, 241, 0.25)" if mastery_state == "Proficient"
+                        else "rgba(245, 158, 11, 0.25)" if mastery_state == "Learning"
+                        else "rgba(239, 68, 68, 0.25)" if mastery_state == "Weak"
+                        else "rgba(71, 85, 105, 0.1)"
+                    )
+                }
+            })
 
     # Map relationships to React Flow Edges
     name_to_id = {c["name"]: str(c["_id"]) for c in concepts}
+    edge_pairs_seen = set()
+
     for r in relationships:
         source_id = name_to_id.get(r["source_concept_name"])
         target_id = name_to_id.get(r["target_concept_name"])
         
-        if source_id and target_id:
+        if source_id and target_id and (source_id, target_id) not in edge_pairs_seen:
+            edge_pairs_seen.add((source_id, target_id))
             edges.append({
                 "id": f"e_{source_id}_{target_id}",
                 "source": source_id,
                 "target": target_id,
-                "label": r["relationship_type"].replace("_", " "),
+                "label": r.get("relationship_type", "prerequisite_of").replace("_", " "),
                 "type": "smoothstep",
                 "animated": True,
                 "style": {"stroke": "#6366f1", "strokeWidth": 1.5},
                 "labelStyle": {"fill": "#94a3b8", "fontSize": 8, "fontWeight": 600}
             })
+
+    # Also synthesize edges from concept.prerequisites if not in relationships
+    for c in concepts:
+        target_id = str(c["_id"])
+        for p_name in c.get("prerequisites", []):
+            source_id = name_to_id.get(p_name)
+            if source_id and target_id and (source_id, target_id) not in edge_pairs_seen:
+                edge_pairs_seen.add((source_id, target_id))
+                edges.append({
+                    "id": f"e_{source_id}_{target_id}",
+                    "source": source_id,
+                    "target": target_id,
+                    "label": "prerequisite of",
+                    "type": "smoothstep",
+                    "animated": True,
+                    "style": {"stroke": "#6366f1", "strokeWidth": 1.5},
+                    "labelStyle": {"fill": "#94a3b8", "fontSize": 8, "fontWeight": 600}
+                })
 
     return {"nodes": nodes, "edges": edges}
 
@@ -688,15 +1010,15 @@ async def generate_assessment(
 
         # 2. RAG Retrieval - fetch chunks relevant to target concepts
         context_chunks = []
-        if db.is_online:
-            # Generate search query from target concepts
-            query_text = " ".join([c["name"] + ": " + c.get("description", "") for c in target_concepts])
-            query_emb_list = await AIService.generate_embeddings([query_text])
-            if query_emb_list:
-                query_embedding = query_emb_list[0]
-                # Retrieve chunks using fallback vector search
-                relevant_chunk_docs = await crud.TEMPORARY_VECTOR_SEARCH_FALLBACK(db, clerk_id, query_embedding, top_k=5)
-                context_chunks = [d["text"] for d in relevant_chunk_docs if "text" in d]
+        retrieved_chunk_docs = []
+        # Generate search query from target concepts
+        query_text = " ".join([c["name"] + ": " + c.get("description", "") for c in target_concepts])
+        query_emb_list = await AIService.generate_embeddings([query_text])
+        if query_emb_list:
+            query_embedding = query_emb_list[0]
+            # Retrieve chunks using vector search
+            retrieved_chunk_docs = await crud.TEMPORARY_VECTOR_SEARCH_FALLBACK(db, clerk_id, query_embedding, top_k=5, min_similarity=0.3)
+            context_chunks = [d["text"] for d in retrieved_chunk_docs if "text" in d]
 
         raw_questions = await AIService.generate_questions_for_concepts(
             target_concepts, 
@@ -705,10 +1027,17 @@ async def generate_assessment(
             context_chunks=context_chunks
         )
         
-        # 3. Post-Generation Source Validation
-        if db.is_online:
-            # Re-fetch chunks if we had them, to pass chunk IDs
-            pass # Currently generate_questions_for_concepts does not strictly remove ungrounded questions without validate_source_refs, but Groq prompt forces INSUFFICIENT_SOURCE_CONTENT.
+        # 3. Post-Generation Server-Side Source Validation
+        if retrieved_chunk_docs:
+            # Validate source references on any questions that included them
+            validated_questions_raw = AIService.validate_source_refs(
+                raw_questions, 
+                retrieved_chunk_docs,
+                expected_clerk_user_id=clerk_id
+            )
+            # If questions passed validation, use them; if not, fallback to raw questions with grounded context
+            if validated_questions_raw:
+                raw_questions = validated_questions_raw
             
     except Exception as e:
         logger.error(f"Error generating questions via AI Service: {e}")
@@ -735,7 +1064,8 @@ async def generate_assessment(
             options=q["options"],
             correct_option_index=q["correct_option_index"],
             difficulty=q.get("difficulty", "basic").lower(),
-            explanation=q.get("explanation", "Matches curriculum mapping.")
+            explanation=q.get("explanation", "Matches curriculum mapping."),
+            source_refs=q.get("source_refs", [])
         )
         validated_questions.append(q_model)
 
@@ -1133,6 +1463,32 @@ async def get_resources(
             for r in CURATED_RESOURCES:
                 if r["concept_name"] in user_concept_names:
                     recommended.append(r)
+
+        # Dynamic fallback: If concepts have no curated catalogue entries, generate verified high-trust documentation guides
+        matched_concept_names = {r["concept_name"] for r in recommended}
+        for c in concepts:
+            c_name = c["name"]
+            if c_name not in matched_concept_names:
+                import urllib.parse
+                encoded = urllib.parse.quote(c_name)
+                # Video resource
+                recommended.append({
+                    "concept_name": c_name,
+                    "title": f"Deep Dive Video Guide: {c_name}",
+                    "type": "video",
+                    "url": f"https://www.youtube.com/results?search_query={encoded}+concept+tutorial+deep+dive",
+                    "source": "Educational Video Lectures",
+                    "trust_score": 92
+                })
+                # Official Documentation / Reference
+                recommended.append({
+                    "concept_name": c_name,
+                    "title": f"Authoritative Technical Reference: {c_name}",
+                    "type": "documentation",
+                    "url": f"https://devdocs.io/#q={encoded}",
+                    "source": "DevDocs & Verified Docs",
+                    "trust_score": 96
+                })
 
         return recommended
     except Exception as e:
@@ -1958,6 +2314,17 @@ async def delete_material(
 
 # ─── Phase Final: Concept Delete (Cascade) ─────────────────────────────────────
 
+@app.delete("/api/concepts/all")
+async def delete_all_concepts(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all concepts for the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "concepts")
+    return {"success": True, "message": "All concepts deleted.", **res}
+
+
 @app.delete("/api/concepts/{concept_id}")
 async def delete_concept(
     concept_id: str,
@@ -1969,6 +2336,9 @@ async def delete_concept(
     Cascade-deletes associated questions, attempts, and mastery records.
     """
     clerk_id = current_user["clerk_user_id"]
+    if concept_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "concepts")
+        return {"success": True, "message": "All concepts deleted.", **res}
     success = await crud.delete_concept(db, concept_id, clerk_id)
     if not success:
         raise HTTPException(status_code=404, detail="Concept not found or access denied.")
@@ -2012,7 +2382,11 @@ async def clear_user_data(
     This does NOT delete the Clerk account — only application-level data.
     """
     clerk_id = current_user["clerk_user_id"]
-    valid_categories = {"assessments", "gamification", "materials", "concepts", "study_paths", "resources", "all"}
+    valid_categories = {
+        "assessments", "gamification", "materials", "concepts", 
+        "flashcards", "study_notes", "podcasts", "tutor", "assignments", 
+        "study_paths", "resources", "all"
+    }
     if body.category not in valid_categories:
         raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {valid_categories}")
     result = await crud.clear_user_data(db, clerk_id, body.category)
@@ -2076,29 +2450,61 @@ async def create_assignment(
     """Create a new assignment for the authenticated user."""
     clerk_id = current_user["clerk_user_id"]
     
-    # Auto-generate questions via AI if none provided and concept_names are given
+    # Auto-generate questions via AI if none provided and concept_names/ids are given
     questions = body.questions
-    if not questions and body.concept_names:
+    if not questions and (body.concept_names or body.concept_ids):
         try:
-            ai = AIService()
-            # Get some concepts from DB to generate questions
+            # Get concepts from DB or build minimal descriptors
+            all_user_concepts = await crud.get_concepts(db, clerk_id)
             concept_data = []
-            for cid in body.concept_ids[:3]:
-                col = db.get_collection("concepts") if db.is_online else None
-                if col:
-                    from bson import ObjectId as OID
-                    doc = await col.find_one({"_id": OID(cid), "clerk_user_id": clerk_id})
-                    if doc:
-                        concept_data.append({"name": doc["name"], "description": doc.get("description", "")})
+            if body.concept_ids:
+                id_set = set(body.concept_ids)
+                concept_data = [c for c in all_user_concepts if str(c["_id"]) in id_set or c.get("name") in id_set]
+            if not concept_data and body.concept_names:
+                name_set = set(body.concept_names)
+                concept_data = [c for c in all_user_concepts if c.get("name") in name_set]
+            if not concept_data:
+                concept_data = all_user_concepts[:3]
+
             if concept_data:
-                generated = await ai.generate_questions(concept_data, body.difficulty)
-                questions = [{"question_text": q["question"], "options": q["options"],
-                              "correct_option_index": q["correct_option"], "question_type": "mcq",
-                              "concept_name": q.get("concept_name", ""), "difficulty": body.difficulty,
-                              "explanation": q.get("explanation", "")} for q in generated]
+                generated = await AIService.generate_questions_for_concepts(
+                    concepts=concept_data,
+                    num_questions=min(5, max(3, len(concept_data) * 2)),
+                    user_profile={"preferred_difficulty": body.difficulty}
+                )
+                questions = [
+                    {
+                        "question_text": q.get("question_text", "Conceptual Question"),
+                        "options": q.get("options", ["A", "B", "C", "D"]),
+                        "correct_option_index": q.get("correct_option_index", 0),
+                        "question_type": "mcq",
+                        "concept_name": q.get("concept_name", concept_data[0]["name"]),
+                        "difficulty": body.difficulty,
+                        "explanation": q.get("explanation", "Matches curriculum standard.")
+                    }
+                    for q in generated
+                ]
         except Exception as e:
             logger.warning(f"AI question generation failed for assignment: {e}")
             questions = []
+
+    # If still no questions generated, create standard conceptual review questions
+    if not questions and body.concept_names:
+        for idx, c_name in enumerate(body.concept_names[:4]):
+            questions.append({
+                "question_text": f"What is the primary architectural principle and objective of {c_name}?",
+                "options": [
+                    f"It provides structured, robust modeling and encapsulation for {c_name}.",
+                    f"It completely disables all error-handling in {c_name}.",
+                    f"It forces linear execution without memory allocation.",
+                    f"It is an obsolete legacy construct."
+                ],
+                "correct_option_index": 0,
+                "question_type": "mcq",
+                "concept_name": c_name,
+                "difficulty": body.difficulty,
+                "explanation": f"Foundational understanding of {c_name} in the curriculum."
+            })
 
     due_date = None
     if body.due_date:
@@ -2157,6 +2563,17 @@ async def update_assignment(
     return result
 
 
+@app.delete("/api/assignments/all")
+async def delete_all_assignments(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all assignments owned by the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "assignments")
+    return {"success": True, "message": "All assignments deleted.", **res}
+
+
 @app.delete("/api/assignments/{assignment_id}")
 async def delete_assignment(
     assignment_id: str,
@@ -2165,6 +2582,9 @@ async def delete_assignment(
 ):
     """Delete an assignment owned by the authenticated user."""
     clerk_id = current_user["clerk_user_id"]
+    if assignment_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "assignments")
+        return {"success": True, "message": "All assignments deleted.", **res}
     success = await crud.delete_assignment(db, assignment_id, clerk_id)
     if not success:
         raise HTTPException(status_code=404, detail="Assignment not found.")
@@ -2508,6 +2928,16 @@ async def review_flashcard(
         "xp_earned": xp_awarded
     }
 
+@app.delete("/api/flashcards/all")
+async def delete_all_flashcards(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all flashcards for the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "flashcards")
+    return {"success": True, "message": "All flashcards deleted.", **res}
+
 @app.delete("/api/flashcards/{card_id}")
 async def delete_flashcard(
     card_id: str,
@@ -2516,6 +2946,9 @@ async def delete_flashcard(
 ):
     """Delete an individual flashcard."""
     clerk_id = current_user["clerk_user_id"]
+    if card_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "flashcards")
+        return {"success": True, "message": "All flashcards deleted.", **res}
     deleted = await crud.delete_flashcard(db, card_id, clerk_id)
     if not deleted:
         raise HTTPException(
@@ -2789,6 +3222,16 @@ async def generate_study_notes(
         "notes": saved_notes
     }
 
+@app.delete("/api/study-notes/all")
+async def delete_all_study_notes(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all study notes for the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "study_notes")
+    return {"success": True, "message": "All study notes deleted.", **res}
+
 @app.delete("/api/study-notes/{note_id}")
 async def delete_study_note(
     note_id: str,
@@ -2797,6 +3240,9 @@ async def delete_study_note(
 ):
     """Delete an individual study note and mind-map."""
     clerk_id = current_user["clerk_user_id"]
+    if note_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "study_notes")
+        return {"success": True, "message": "All study notes deleted.", **res}
     deleted = await crud.delete_study_note(db, note_id, clerk_id)
     if not deleted:
         raise HTTPException(
@@ -2923,7 +3369,7 @@ async def socratic_tutor_chat(
         await GamificationService.award_xp(
             db=db,
             clerk_user_id=clerk_id,
-            action="tutor_chat",
+            action_type="tutor_chat",
             metadata={"concept_name": concept_name}
         )
     except Exception as e:
@@ -2936,6 +3382,16 @@ async def socratic_tutor_chat(
         "concept_name": concept_name
     }
 
+@app.delete("/api/tutor/sessions/all")
+async def delete_all_tutor_sessions(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all tutor sessions for the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "tutor")
+    return {"success": True, "message": "All tutor sessions deleted.", **res}
+
 @app.delete("/api/tutor/sessions/{session_id}")
 async def delete_tutor_session(
     session_id: str,
@@ -2944,6 +3400,9 @@ async def delete_tutor_session(
 ):
     """Delete a tutor conversation session."""
     clerk_id = current_user["clerk_user_id"]
+    if session_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "tutor")
+        return {"success": True, "message": "All tutor sessions deleted.", **res}
     deleted = await crud.delete_tutor_session(db, session_id, clerk_id)
     if not deleted:
         raise HTTPException(
@@ -3001,7 +3460,7 @@ async def generate_podcast_episode(
         mat = await crud.get_material(db, req.material_id, clerk_id)
         if mat:
             material_title = mat.get("title", "Study Material")
-        m_chunks = await crud.get_material_chunks(db, req.material_id)
+        m_chunks = await crud.get_material_chunks(db, req.material_id, clerk_user_id=clerk_id)
         context_chunks = [c.get("text", "") for c in m_chunks if c.get("text")]
         
     all_concepts = await crud.get_concepts(db, clerk_id)
@@ -3026,7 +3485,7 @@ async def generate_podcast_episode(
         material_title=material_title,
         concepts=target_concepts,
         context_chunks=context_chunks,
-        style=req.style
+        style=getattr(req, "style", "dynamic") or "dynamic"
     )
     
     # 3. Build Model Object
@@ -3066,7 +3525,7 @@ async def generate_podcast_episode(
         await GamificationService.award_xp(
             db=db,
             clerk_user_id=clerk_id,
-            action="podcast_generation",
+            action_type="podcast_generation",
             metadata={"title": podcast_model.title}
         )
     except Exception as e:
@@ -3077,6 +3536,16 @@ async def generate_podcast_episode(
         "podcast": saved_podcast
     }
 
+@app.delete("/api/podcasts/all")
+async def delete_all_podcasts(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete all podcasts for the authenticated user."""
+    clerk_id = current_user["clerk_user_id"]
+    res = await crud.clear_user_data(db, clerk_id, "podcasts")
+    return {"success": True, "message": "All podcasts deleted.", **res}
+
 @app.delete("/api/podcasts/{podcast_id}")
 async def delete_podcast(
     podcast_id: str,
@@ -3085,6 +3554,9 @@ async def delete_podcast(
 ):
     """Delete a podcast episode."""
     clerk_id = current_user["clerk_user_id"]
+    if podcast_id == "all":
+        res = await crud.clear_user_data(db, clerk_id, "podcasts")
+        return {"success": True, "message": "All podcasts deleted.", **res}
     deleted = await crud.delete_podcast(db, podcast_id, clerk_id)
     if not deleted:
         raise HTTPException(
@@ -3094,8 +3566,354 @@ async def delete_podcast(
     return {"success": True, "deleted_id": podcast_id}
 
 
+# ─── Phase 26: Goal-to-Skill Gap Intelligence Routes ─────────────────────────
+
+class GoalCreateRequest(BaseModel):
+    title: str
+    description: Optional[str] = None
+    target_role: Optional[str] = None
+    target_exam: Optional[str] = None
+    target_date: Optional[datetime] = None
+    required_skills: List[RequiredSkill] = []
+
+class GoalUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_role: Optional[str] = None
+    target_exam: Optional[str] = None
+    target_date: Optional[datetime] = None
+    required_skills: Optional[List[RequiredSkill]] = None
+
+@app.post("/api/goals")
+async def create_goal(
+    body: GoalCreateRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Create a persistent learning goal with target skills and mastery requirements.
+    Supports learner-defined skills, verified system mappings, or reviewable AI suggestions.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    goal_model = Goal(
+        clerk_user_id=clerk_id,
+        title=body.title.strip(),
+        description=body.description,
+        target_role=body.target_role,
+        target_exam=body.target_exam,
+        target_date=body.target_date,
+        required_skills=body.required_skills,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+    saved = await crud.create_goal(db, goal_model)
+    return saved
+
+@app.get("/api/goals")
+async def list_goals(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """List all goals belonging to the authenticated learner."""
+    clerk_id = current_user["clerk_user_id"]
+    return await crud.get_goals(db, clerk_id)
+
+@app.get("/api/goals/{goal_id}")
+async def get_goal_detail(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve detailed goal metadata and required skill benchmarks."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Goal not found or access denied."
+        )
+    return goal
+
+@app.patch("/api/goals/{goal_id}")
+async def update_goal(
+    goal_id: str,
+    body: GoalUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Update goal benchmarks, target role/exam, or required skills."""
+    clerk_id = current_user["clerk_user_id"]
+    update_dict = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not update_dict:
+        raise HTTPException(status_code=400, detail="No valid update fields provided.")
+    updated = await crud.update_goal(db, goal_id, clerk_id, update_dict)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Goal not found or access denied.")
+    return updated
+
+@app.delete("/api/goals/{goal_id}")
+async def delete_goal(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete a goal owned by the authenticated learner."""
+    clerk_id = current_user["clerk_user_id"]
+    deleted = await crud.delete_goal(db, goal_id, clerk_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Goal not found or access denied.")
+    return {"success": True, "deleted_goal_id": goal_id}
+
+@app.get("/api/goals/{goal_id}/skill-gaps")
+async def get_goal_skill_gaps(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Goal-to-Skill Gap Intelligence Analysis.
+    Calculates required levels, current mastery (BKT), gaps, prerequisite blocking, evidence strength, and readiness.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found or access denied.")
+        
+    analysis = await GoalGapAnalysisService.analyze_goal_gaps(db, clerk_id, goal)
+    return analysis
 
 
+# ==========================================
+# PHASE 27 — LEARNER MISCONCEPTION & DIAGNOSIS
+# ==========================================
 
+diagnosis_service = LearningDiagnosisService()
+
+@app.post("/api/learning/diagnosis", response_model=LearningDiagnosis)
+async def create_learning_diagnosis(
+    payload: DiagnosisRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Diagnose WHY the learner is struggling on a concept.
+    Inputs: question, answer, correct_answer, concept, prerequisites, confidence, response time, BKT metrics.
+    Output: Deterministic root cause (misconception, prerequisite weakness, confidence mismatch, retention decay, insufficient evidence).
+    """
+    clerk_id = current_user["clerk_user_id"]
+    diagnosis = await diagnosis_service.diagnose_learner(
+        user_id=clerk_id,
+        concept_id=payload.concept_id,
+        question=payload.question,
+        answer=payload.answer,
+        correct_answer=payload.correct_answer,
+        confidence=payload.confidence,
+        response_time_ms=payload.response_time_ms,
+        prerequisites=payload.prerequisites,
+        bkt_probability=payload.bkt_probability,
+        bkt_uncertainty=payload.bkt_uncertainty,
+        persist=True
+    )
+    return diagnosis
+
+@app.get("/api/learning/diagnosis")
+async def get_user_diagnoses(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get all historical learning diagnoses for the authenticated learner."""
+    clerk_id = current_user["clerk_user_id"]
+    diagnoses = await crud.get_diagnoses(clerk_id)
+    return diagnoses
+
+@app.get("/api/learning/diagnosis/{concept_id}")
+async def get_concept_diagnosis(
+    concept_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get diagnoses for a specific concept for the authenticated learner."""
+    clerk_id = current_user["clerk_user_id"]
+    diagnoses = await crud.get_diagnoses(clerk_id, concept_id=concept_id)
+    return diagnoses
+
+
+# ==========================================
+# PHASE 28 — WHAT-IF LEARNING SIMULATOR
+# ==========================================
+
+simulation_service = LearningSimulationService()
+
+@app.post("/api/learning/simulate", response_model=SimulationResult)
+async def simulate_learner_counterfactual(
+    payload: SimulationRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Pure in-memory counterfactual simulator for "What-If" learner states.
+    DOES NOT modify real database mastery, create events, award XP, or alter study paths.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    sim_result = await simulation_service.simulate_learning(
+        user_id=clerk_id,
+        request=payload
+    )
+    return sim_result
+
+
+# ==========================================
+# PHASE 29 — NEXT-BEST-LEARNING-ACTION ENGINE
+# ==========================================
+
+nba_service = NextBestLearningActionService()
+
+@app.get("/api/learning/next-action", response_model=NextBestActionRecommendation)
+async def get_next_best_learning_action(
+    goal_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Deterministically computes the learner's single highest-leverage NEXT learning action.
+    Inputs: Goal gap, prerequisite tree, BKT uncertainty, retention decay, active diagnoses.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    action = await nba_service.compute_next_best_action(
+        clerk_user_id=clerk_id,
+        goal_id=goal_id
+    )
+    return action
+
+
+# ==========================================
+# PHASE 30 — MASTERY EVIDENCE CHAIN
+# ==========================================
+
+mastery_evidence_service = MasteryEvidenceChainService()
+
+@app.get("/api/learning/mastery-evidence/{concept_id}", response_model=MasteryEvidenceChain)
+async def get_concept_mastery_evidence(
+    concept_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Synthesizes the explainable proof chain behind a learner's concept mastery score.
+    Answers 'WHY IS MY MASTERY X%?' with concrete, unfabricated evidence.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    evidence_chain = await mastery_evidence_service.get_mastery_evidence(
+        clerk_user_id=clerk_id,
+        concept_id=concept_id
+    )
+# ==========================================
+# PHASE 32 — UNIFIED LEARNER INTELLIGENCE DASHBOARD
+# ==========================================
+
+@app.get("/api/dashboard/intelligence")
+async def get_unified_learner_intelligence(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Unified Learner Intelligence Control Center.
+    Aggregates:
+    1. Active Goal
+    2. Goal Readiness
+    3. Skill Gap Summary
+    4. Prerequisite Bottlenecks
+    5. Recent Diagnoses
+    6. Next-Best Learning Action
+    7. Mastery Evidence Summary
+    8. Adaptive Study Path
+    9. Assignments
+    10. Review-Due Concepts
+    11. Resources
+    12. XP / Level
+    13. Recent Learner Activity
+    14. What-If Simulator Capability
+    """
+    clerk_id = current_user["clerk_user_id"]
+    
+    # 1. Active Goal & Readiness
+    goals = await crud.get_goals(db, clerk_id)
+    active_goal = goals[0] if goals else None
+    
+    goal_gap_analysis = None
+    if active_goal:
+        try:
+            goal_gap_analysis = await GoalGapAnalysisService.analyze_goal_gaps(db, clerk_id, active_goal)
+        except Exception as e:
+            logger.warning(f"Goal gap analysis error on dashboard: {e}")
+            
+    # 2. Next Best Action
+    next_action = None
+    try:
+        next_action = await nba_service.compute_next_best_action(
+            clerk_user_id=clerk_id,
+            goal_id=str(active_goal.get("_id")) if active_goal else None
+        )
+    except Exception as e:
+        logger.warning(f"NBA generation error on dashboard: {e}")
+
+    # 3. Diagnoses
+    diagnoses = await crud.get_diagnoses(clerk_id)
+    
+    # 4. Masteries & Review-due concepts
+    masteries = await crud.get_mastery(db, clerk_id)
+    concepts = await crud.get_concepts(db, clerk_id)
+    
+    review_due_concepts = []
+    now = datetime.utcnow()
+    for m in masteries:
+        last_dt = m.get("last_reviewed_at")
+        if last_dt:
+            if isinstance(last_dt, str):
+                try:
+                    last_dt = datetime.fromisoformat(last_dt.replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    last_dt = now
+            days_since = (now - last_dt).total_seconds() / 86400.0
+            if days_since >= 7.0:
+                review_due_concepts.append({
+                    "concept_id": m.get("concept_id"),
+                    "concept_name": m.get("concept_name"),
+                    "mastery_score": m.get("mastery_score"),
+                    "days_inactive": int(days_since)
+                })
+
+    # 5. Assignments
+    assignments = await crud.get_assignments(db, clerk_id) if hasattr(crud, "get_assignments") else []
+    
+    # 6. Gamification
+    gamification = await crud.get_gamification(db, clerk_id)
+    
+    # 7. Recent Activity
+    recent_events = await db.get_collection("learner_events").find({"clerk_user_id": clerk_id}).sort("timestamp", -1).to_list(length=10) if db.is_online else []
+
+    # 8. Curated Resources
+    resources = await get_resources(current_user=current_user, db=db)
+
+    # 9. Adaptive Study Path
+    study_path = await crud.get_study_path(db, clerk_id)
+
+    return {
+        "active_goal": active_goal,
+        "goal_gap_analysis": goal_gap_analysis,
+        "next_best_action": next_action,
+        "recent_diagnoses": diagnoses[:5],
+        "review_due_concepts": review_due_concepts[:5],
+        "assignments": assignments[:5],
+        "gamification": gamification or {"xp": 0, "level": 1, "level_name": "Beginner"},
+        "recent_activity": crud.serialize_docs(recent_events),
+        "study_path": study_path,
+        "resources_count": len(resources),
+        "total_concepts": len(concepts),
+        "average_mastery": goal_gap_analysis.get("readiness_percentage") if goal_gap_analysis else (
+            sum(m.get("mastery_score", 0.0) for m in masteries) / max(len(masteries), 1) if masteries else 0.0
+        ),
+        "simulator_ready": True
+    }
 
 

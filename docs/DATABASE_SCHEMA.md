@@ -22,7 +22,7 @@ Tracks profile details and preferences for authenticated Clerk users.
 ```
 
 ### 2. `materials`
-Stores uploaded PDF materials, extracted text, and processing status.
+Stores uploaded PDF and multimodal materials, extracted text, and pipeline lifecycle status.
 ```json
 {
   "_id": "ObjectId",
@@ -31,7 +31,32 @@ Stores uploaded PDF materials, extracted text, and processing status.
   "file_name": "String",
   "content_type": "String",
   "raw_text": "String",
-  "status": "String ('processing' | 'processed' | 'failed')",
+  "status": "String ('UPLOADED' | 'EXTRACTING' | 'EXTRACTED' | 'CHUNKING' | 'EMBEDDING' | 'READY' | 'PARTIAL' | 'FAILED')",
+  "source_type": "String ('pdf' | 'txt' | 'image' | 'audio' | 'video')",
+  "page_count": "Integer (Optional)",
+  "duration": "Double (Optional)",
+  "error_message": "String (Optional)",
+  "created_at": "ISODate"
+}
+```
+
+### 2b. `material_chunks` (Canonical RAG Chunks)
+Stores canonical chunks and semantic embeddings for source grounding.
+```json
+{
+  "_id": "ObjectId",
+  "chunk_id": "String (Indexed, Unique)",
+  "material_id": "ObjectId (Indexed)",
+  "clerk_user_id": "String (Indexed)",
+  "sequence": "Integer",
+  "text": "String",
+  "page": "Integer (Optional)",
+  "section": "String (Optional)",
+  "source_type": "String",
+  "content_hash": "String (SHA-256)",
+  "embedding_model": "String ('models/gemini-embedding-001')",
+  "embedding": "Array of Doubles (768-dim)",
+  "embedding_status": "String ('completed' | 'failed' | 'fallback')",
   "created_at": "ISODate"
 }
 ```
@@ -199,3 +224,152 @@ Tracks individual learner reviews, helpfulness votes, and completion milestones.
   "updated_at": "ISODate"
 }
 ```
+
+### 13. `user_preferences`
+Tracks learner extended profile preferences, target roles, exams, and daily study targets.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed, Unique)",
+  "display_name": "String (Optional)",
+  "preferred_name": "String (Optional)",
+  "learning_goal": "String (Optional)",
+  "target_role": "String (Optional)",
+  "target_exam": "String (Optional)",
+  "current_level": "String ('Beginner' | 'Intermediate' | 'Advanced' | 'Expert')",
+  "preferred_difficulty": "String ('basic' | 'intermediate' | 'advanced')",
+  "daily_study_target_minutes": "Integer (5-480)",
+  "preferred_session_duration_minutes": "Integer (5-120)",
+  "deadline": "ISODate (Optional)",
+  "updated_at": "ISODate"
+}
+```
+
+### 14. `goals`
+Persistent goal-to-skill state model storing benchmark targets, required skills, and readiness mappings.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "title": "String (e.g. 'Data Analyst')",
+  "description": "String (Optional)",
+  "target_role": "String (Optional)",
+  "target_exam": "String (Optional)",
+  "target_date": "ISODate (Optional)",
+  "required_skills": [
+    {
+      "name": "String",
+      "required_level": "Double (0.0-100.0)",
+      "source": "String ('learner_defined' | 'verified_system_mapping' | 'ai_suggested')",
+      "weight": "Double (0.1-5.0)"
+    }
+  ],
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
+}
+```
+
+### 15. `assignments`
+Lifecycle assignments supporting drafts, submissions, automatic grading, and XP impact.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "title": "String",
+  "description": "String",
+  "concept_ids": "Array of ObjectIds",
+  "material_id": "ObjectId (Optional)",
+  "difficulty": "String ('basic' | 'intermediate' | 'advanced')",
+  "status": "String ('DRAFT' | 'IN_PROGRESS' | 'SUBMITTED' | 'EVALUATED')",
+  "questions": "Array of Question Objects",
+  "answers": "Object",
+  "score": "Double (0.0-100.0, Optional)",
+  "feedback": "String (Optional)",
+  "xp_awarded": "Integer (Optional)",
+  "created_at": "ISODate",
+  "submitted_at": "ISODate (Optional)"
+}
+```
+
+### 16. `podcasts`
+NotebookLM-style two-host AI conversational podcasts with multi-speaker dialogue scripts.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "material_id": "ObjectId (Optional)",
+  "material_title": "String",
+  "concept_ids": "Array of ObjectIds",
+  "title": "String",
+  "summary": "String",
+  "episode_duration_est_minutes": "Double",
+  "hosts": "Array of Strings",
+  "script": [
+    {
+      "speaker": "String ('Alex' | 'Sam')",
+      "text": "String",
+      "emotion": "String",
+      "pitch": "Double",
+      "rate": "Double"
+    }
+  ],
+  "created_at": "ISODate"
+}
+```
+
+### 17. `tutor_sessions`
+Interactive Socratic tutoring chat sessions grounded in course materials.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "concept_id": "ObjectId (Optional)",
+  "concept_name": "String",
+  "messages": [
+    {
+      "role": "String ('user' | 'assistant' | 'system')",
+      "content": "String",
+      "timestamp": "ISODate"
+    }
+  ],
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
+}
+```
+
+### 18. `flashcards`
+AI-generated conceptual flashcards scheduled using the SM-2 Spaced Repetition algorithm.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "concept_id": "ObjectId (Optional)",
+  "material_id": "ObjectId (Optional)",
+  "front": "String",
+  "back": "String",
+  "explanation": "String (Optional)",
+  "interval_days": "Integer",
+  "ease_factor": "Double",
+  "repetitions": "Integer",
+  "next_review": "ISODate (Indexed)",
+  "created_at": "ISODate"
+}
+```
+
+### 19. `study_notes`
+Comprehensive study notes, summaries, key takeaways, and mind map trees.
+```json
+{
+  "_id": "ObjectId",
+  "clerk_user_id": "String (Indexed)",
+  "material_id": "ObjectId (Optional)",
+  "concept_id": "ObjectId (Optional)",
+  "title": "String",
+  "summary": "String",
+  "key_points": "Array of Strings",
+  "detailed_content": "String (Markdown)",
+  "mind_map_tree": "Object",
+  "created_at": "ISODate"
+}
+```
+

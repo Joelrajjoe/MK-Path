@@ -271,13 +271,40 @@ export default function AudioPodcastStudio() {
           </div>
         </div>
 
-        <button
-          onClick={() => setShowGenModal(true)}
-          className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white font-bold text-xs shadow-md shadow-orange-600/20 active:scale-95 transition-all cursor-pointer"
-        >
-          <Sparkles size={14} />
-          <span>Synthesize New Episode</span>
-        </button>
+        <div className="flex items-center gap-3">
+          {podcasts.length > 0 && (
+            <button
+              onClick={async () => {
+                if (!window.confirm('Delete all synthesized podcast episodes?')) return
+                try {
+                  const token = await getToken()
+                  const res = await fetch('http://localhost:8000/api/podcasts/all', {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${token}` }
+                  })
+                  if (res.ok) {
+                    stopAudioPlayback()
+                    setPodcasts([])
+                    setSelectedPodcast(null)
+                  }
+                } catch (err) {
+                  console.error('Failed to clear podcasts:', err)
+                }
+              }}
+              className="flex items-center space-x-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-red-500/30 text-red-400 hover:bg-red-500/10 font-bold text-xs transition-colors cursor-pointer"
+            >
+              <Trash2 size={14} />
+              <span>Delete All</span>
+            </button>
+          )}
+          <button
+            onClick={() => setShowGenModal(true)}
+            className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white font-bold text-xs shadow-md shadow-orange-600/20 active:scale-95 transition-all cursor-pointer"
+          >
+            <Sparkles size={14} />
+            <span>Synthesize New Episode</span>
+          </button>
+        </div>
       </div>
 
       {/* Notifications */}

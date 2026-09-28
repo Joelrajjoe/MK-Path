@@ -56,6 +56,9 @@ _DEMO_DB: Dict[str, List[Dict[str, Any]]] = {
     "study_notes": [],
     "tutor_sessions": [],
     "podcasts": [],
+    "assignments": [],
+    "goals": [],
+    "learning_diagnoses": [],
     "gamification": [
         {
             "_id": ObjectId("64e8cf65f5a65c4dbf000002"),
@@ -87,6 +90,8 @@ def _demo_get_by_id(collection: str, doc_id: str, clerk_user_id: Optional[str] =
 def _demo_insert(collection: str, data: Dict[str, Any]) -> Dict[str, Any]:
     if "_id" not in data:
         data["_id"] = ObjectId()
+    if collection not in _DEMO_DB:
+        _DEMO_DB[collection] = []
     _DEMO_DB[collection].append(data)
     return data
 
@@ -178,19 +183,139 @@ async def create_material(db: DatabaseManager, material: Material) -> Dict[str, 
     else:
         return serialize_doc(_demo_insert("materials", material_dict))
 
-async def delete_material(db: DatabaseManager, material_id: str, clerk_user_id: str) -> bool:
-    try:
-        obj_id = ObjectId(material_id)
-    except Exception:
-        return False
-
+async def update_material_status(db: DatabaseManager, material_id: str, clerk_user_id: str, status: str, error_message: str = None) -> bool:
+    update_fields = {"status": status}
+    if error_message is not None:
+        update_fields["error_message"] = error_message
     if db.is_online:
         col = db.get_collection("materials")
-        # Enforce clerk_user_id scoping on delete
-        res = await col.delete_one({"_id": obj_id, "clerk_user_id": clerk_user_id})
-        return res.deleted_count > 0
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(material_id), "clerk_user_id": clerk_user_id},
+                {"$set": update_fields}
+            )
+            return res.modified_count > 0
+        except Exception:
+            return False
     else:
-        return _demo_delete("materials", material_id, clerk_user_id)
+        mat = next((d for d in _DEMO_DB.get("materials", []) if str(d.get("_id")) == material_id and d.get("clerk_user_id") == clerk_user_id), None)
+        if mat:
+            mat["status"] = status
+            if error_message is not None:
+                mat["error_message"] = error_message
+            return True
+        return False
+
+async def update_material_title(db: DatabaseManager, material_id: str, clerk_user_id: str, title: str) -> bool:
+    if db.is_online:
+        col = db.get_collection("materials")
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(material_id), "clerk_user_id": clerk_user_id},
+                {"$set": {"title": title}}
+            )
+            return res.modified_count > 0
+        except Exception:
+            return False
+    else:
+        mat = next((d for d in _DEMO_DB.get("materials", []) if str(d.get("_id")) == material_id and d.get("clerk_user_id") == clerk_user_id), None)
+        if mat:
+            mat["title"] = title
+            return True
+        return False
+
+async def update_concept(db: DatabaseManager, concept_id: str, clerk_user_id: str, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Remove immutable keys
+    update_fields.pop("_id", None)
+    update_fields.pop("clerk_user_id", None)
+    
+    if db.is_online:
+        col = db.get_collection("concepts")
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(concept_id), "clerk_user_id": clerk_user_id},
+                {"$set": update_fields}
+            )
+            return await get_concept(db, concept_id, clerk_user_id)
+        except Exception:
+            return None
+    else:
+        con = next((d for d in _DEMO_DB.get("concepts", []) if str(d.get("_id")) == concept_id and d.get("clerk_user_id") == clerk_user_id), None)
+        if con:
+            con.update(update_fields)
+            return serialize_doc(con)
+        return None
+
+async def merge_concepts(db: DatabaseManager, clerk_user_id: str, primary_concept_id: str, duplicate_concept_id: str) -> Optional[Dict[str, Any]]:
+    """Merges duplicate_concept into primary_concept and re-points questions, attempts, relationships, and mastery."""
+    primary = await get_concept(db, primary_concept_id, clerk_user_id)
+    duplicate = await get_concept(db, duplicate_concept_id, clerk_user_id)
+    if not primary or not duplicate:
+        return None
+
+    p_id = str(primary["_id"])
+    d_id = str(duplicate["_id"])
+    p_name = primary["name"]
+    d_name = duplicate["name"]
+
+    # Merge prerequisites (union without duplicates)
+    merged_prereqs = list(set(primary.get("prerequisites", []) + duplicate.get("prerequisites", [])))
+    if p_name in merged_prereqs:
+        merged_prereqs.remove(p_name)
+    if d_name in merged_prereqs:
+        merged_prereqs.remove(d_name)
+
+    # Merge source_refs
+    merged_refs = primary.get("source_refs", []) + duplicate.get("source_refs", [])
+
+    # Update primary concept
+    await update_concept(db, p_id, clerk_user_id, {
+        "prerequisites": merged_prereqs,
+        "source_refs": merged_refs,
+        "exam_relevance": max(primary.get("exam_relevance", 80), duplicate.get("exam_relevance", 80)),
+        "industry_relevance": max(primary.get("industry_relevance", 80), duplicate.get("industry_relevance", 80))
+    })
+
+    # Repoint Questions
+    if db.is_online:
+        await db.get_collection("questions").update_many(
+            {"concept_id": d_id, "clerk_user_id": clerk_user_id},
+            {"$set": {"concept_id": p_id, "concept_name": p_name}}
+        )
+        await db.get_collection("attempts").update_many(
+            {"concept_id": d_id, "clerk_user_id": clerk_user_id},
+            {"$set": {"concept_id": p_id}}
+        )
+        # Update relationships referencing duplicate name
+        await db.get_collection("relationships").update_many(
+            {"source_concept_name": d_name, "clerk_user_id": clerk_user_id},
+            {"$set": {"source_concept_name": p_name}}
+        )
+        await db.get_collection("relationships").update_many(
+            {"target_concept_name": d_name, "clerk_user_id": clerk_user_id},
+            {"$set": {"target_concept_name": p_name}}
+        )
+        # Delete duplicate concept record
+        await db.get_collection("concepts").delete_one({"_id": ObjectId(d_id), "clerk_user_id": clerk_user_id})
+        await db.get_collection("mastery").delete_many({"concept_id": d_id, "clerk_user_id": clerk_user_id})
+    else:
+        for q in _DEMO_DB.get("questions", []):
+            if q.get("concept_id") == d_id and q.get("clerk_user_id") == clerk_user_id:
+                q["concept_id"] = p_id
+                q["concept_name"] = p_name
+        for a in _DEMO_DB.get("attempts", []):
+            if a.get("concept_id") == d_id and a.get("clerk_user_id") == clerk_user_id:
+                a["concept_id"] = p_id
+        for r in _DEMO_DB.get("relationships", []):
+            if r.get("clerk_user_id") == clerk_user_id:
+                if r.get("source_concept_name") == d_name:
+                    r["source_concept_name"] = p_name
+                if r.get("target_concept_name") == d_name:
+                    r["target_concept_name"] = p_name
+        _DEMO_DB["concepts"] = [c for c in _DEMO_DB.get("concepts", []) if not (str(c.get("_id")) == d_id and c.get("clerk_user_id") == clerk_user_id)]
+        _DEMO_DB["mastery"] = [m for m in _DEMO_DB.get("mastery", []) if not (m.get("concept_id") == d_id and m.get("clerk_user_id") == clerk_user_id)]
+
+    return await get_concept(db, p_id, clerk_user_id)
 
 
 # --- Concepts & Relationships Operations (User Isolated) ---
@@ -654,7 +779,7 @@ async def get_user_profile(db, clerk_user_id: str) -> Optional[Dict[str, Any]]:
 # ─── Material Delete (Cascade) ────────────────────────────────────────────────
 
 async def delete_material(db, material_id: str, clerk_user_id: str) -> bool:
-    """Delete a material and cascade-delete all derived data (concepts, relationships, questions, attempts, mastery)."""
+    """Delete a material and cascade-delete all derived data (concepts, relationships, questions, attempts, mastery, flashcards, study_notes, tutor_sessions, podcasts, and chunks)."""
     if db.is_online:
         # Verify ownership
         col_mat = db.get_collection("materials")
@@ -666,22 +791,75 @@ async def delete_material(db, material_id: str, clerk_user_id: str) -> bool:
         concepts = await col_con.find({"material_id": material_id, "clerk_user_id": clerk_user_id}).to_list(None)
         concept_ids = [str(c["_id"]) for c in concepts]
         concept_names = [c["name"] for c in concepts]
-        # Cascade delete
-        await db.get_collection("questions").delete_many({"concept_id": {"$in": concept_ids}, "clerk_user_id": clerk_user_id})
-        await db.get_collection("attempts").delete_many({"concept_id": {"$in": concept_ids}, "clerk_user_id": clerk_user_id})
-        await db.get_collection("mastery").delete_many({"concept_id": {"$in": concept_ids}, "clerk_user_id": clerk_user_id})
+
+        # Cascade delete across all collections
+        await db.get_collection("material_chunks").delete_many({"material_id": material_id, "clerk_user_id": clerk_user_id})
+        await db.get_collection("questions").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": {"$in": concept_ids}}, {"concept_name": {"$in": concept_names}}]
+        })
+        await db.get_collection("attempts").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": {"$in": concept_ids}}, {"concept_name": {"$in": concept_names}}]
+        })
+        await db.get_collection("mastery").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": {"$in": concept_ids}}, {"concept_name": {"$in": concept_names}}]
+        })
+        await db.get_collection("flashcards").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [
+                {"material_id": material_id},
+                {"concept_id": {"$in": concept_ids}},
+                {"concept_name": {"$in": concept_names}}
+            ]
+        })
+        await db.get_collection("study_notes").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [
+                {"material_id": material_id},
+                {"concept_id": {"$in": concept_ids}},
+                {"concept_name": {"$in": concept_names}}
+            ]
+        })
+        await db.get_collection("podcasts").delete_many({"material_id": material_id, "clerk_user_id": clerk_user_id})
+        await db.get_collection("tutor_sessions").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": {"$in": concept_ids}}, {"concept_name": {"$in": concept_names}}]
+        })
+        await db.get_collection("assignments").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"source_material_ids": material_id}, {"concept_ids": {"$in": concept_ids}}]
+        })
         await db.get_collection("relationships").delete_many({"material_id": material_id, "clerk_user_id": clerk_user_id})
         await col_con.delete_many({"material_id": material_id, "clerk_user_id": clerk_user_id})
         await col_mat.delete_one({"_id": ObjectId(material_id), "clerk_user_id": clerk_user_id})
         return True
+
     # Demo mode
     mat = next((d for d in _DEMO_DB.get("materials", []) if str(d.get("_id")) == material_id and d.get("clerk_user_id") == clerk_user_id), None)
     if not mat:
         return False
     concepts = [c for c in _DEMO_DB.get("concepts", []) if c.get("material_id") == material_id]
     concept_ids = [str(c["_id"]) for c in concepts]
+    concept_names = [c.get("name") for c in concepts]
+
     for col in ["questions", "attempts", "mastery"]:
-        _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("concept_id") not in concept_ids]
+        _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("concept_id") not in concept_ids and d.get("concept_name") not in concept_names]
+    
+    _DEMO_DB["flashcards"] = [
+        d for d in _DEMO_DB.get("flashcards", [])
+        if d.get("material_id") != material_id and d.get("concept_id") not in concept_ids and d.get("concept_name") not in concept_names
+    ]
+    _DEMO_DB["study_notes"] = [
+        d for d in _DEMO_DB.get("study_notes", [])
+        if d.get("material_id") != material_id and d.get("concept_id") not in concept_ids and d.get("concept_name") not in concept_names
+    ]
+    _DEMO_DB["podcasts"] = [d for d in _DEMO_DB.get("podcasts", []) if d.get("material_id") != material_id]
+    _DEMO_DB["tutor_sessions"] = [
+        d for d in _DEMO_DB.get("tutor_sessions", [])
+        if d.get("concept_id") not in concept_ids and d.get("concept_name") not in concept_names
+    ]
     _DEMO_DB["relationships"] = [d for d in _DEMO_DB.get("relationships", []) if d.get("material_id") != material_id]
     _DEMO_DB["concepts"] = [d for d in _DEMO_DB.get("concepts", []) if d.get("material_id") != material_id]
     _DEMO_DB["materials"] = [d for d in _DEMO_DB.get("materials", []) if str(d.get("_id")) != material_id]
@@ -691,28 +869,55 @@ async def delete_material(db, material_id: str, clerk_user_id: str) -> bool:
 # ─── Concept Delete (Cascade) ─────────────────────────────────────────────────
 
 async def delete_concept(db, concept_id: str, clerk_user_id: str) -> bool:
-    """Delete a concept and cascade-delete questions, attempts, and mastery for it."""
+    """Delete a concept and cascade-delete questions, attempts, mastery, flashcards, and notes for it."""
     if db.is_online:
         col_con = db.get_collection("concepts")
         con = await col_con.find_one({"_id": ObjectId(concept_id), "clerk_user_id": clerk_user_id})
         if not con:
             return False
         concept_name = con.get("name", "")
-        await db.get_collection("questions").delete_many({"concept_id": concept_id, "clerk_user_id": clerk_user_id})
-        await db.get_collection("attempts").delete_many({"concept_id": concept_id, "clerk_user_id": clerk_user_id})
-        await db.get_collection("mastery").delete_many({"concept_id": concept_id, "clerk_user_id": clerk_user_id})
+        await db.get_collection("questions").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
+        await db.get_collection("attempts").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
+        await db.get_collection("mastery").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
+        await db.get_collection("flashcards").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
+        await db.get_collection("study_notes").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
+        await db.get_collection("tutor_sessions").delete_many({
+            "clerk_user_id": clerk_user_id,
+            "$or": [{"concept_id": concept_id}, {"concept_name": concept_name}]
+        })
         await db.get_collection("relationships").delete_many({
             "clerk_user_id": clerk_user_id,
             "$or": [{"source_concept_name": concept_name}, {"target_concept_name": concept_name}]
         })
         await col_con.delete_one({"_id": ObjectId(concept_id), "clerk_user_id": clerk_user_id})
         return True
+
     # Demo mode
     con = next((d for d in _DEMO_DB.get("concepts", []) if str(d.get("_id")) == concept_id and d.get("clerk_user_id") == clerk_user_id), None)
     if not con:
         return False
+    concept_name = con.get("name", "")
     for col in ["questions", "attempts", "mastery"]:
-        _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("concept_id") != concept_id]
+        _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("concept_id") != concept_id and d.get("concept_name") != concept_name]
+    _DEMO_DB["flashcards"] = [d for d in _DEMO_DB.get("flashcards", []) if d.get("concept_id") != concept_id and d.get("concept_name") != concept_name]
+    _DEMO_DB["study_notes"] = [d for d in _DEMO_DB.get("study_notes", []) if d.get("concept_id") != concept_id and d.get("concept_name") != concept_name]
+    _DEMO_DB["tutor_sessions"] = [d for d in _DEMO_DB.get("tutor_sessions", []) if d.get("concept_id") != concept_id and d.get("concept_name") != concept_name]
+    _DEMO_DB["relationships"] = [d for d in _DEMO_DB.get("relationships", []) if d.get("source_concept_name") != concept_name and d.get("target_concept_name") != concept_name]
     _DEMO_DB["concepts"] = [d for d in _DEMO_DB.get("concepts", []) if str(d.get("_id")) != concept_id]
     return True
 
@@ -722,7 +927,7 @@ async def delete_concept(db, concept_id: str, clerk_user_id: str) -> bool:
 async def clear_user_data(db, clerk_user_id: str, category: str) -> Dict[str, Any]:
     """
     Clear a category of authenticated user data.
-    category: 'assessments' | 'gamification' | 'materials' | 'concepts' | 'study_paths' | 'resources' | 'all'
+    category: 'assessments' | 'gamification' | 'materials' | 'concepts' | 'flashcards' | 'study_notes' | 'podcasts' | 'tutor' | 'assignments' | 'study_paths' | 'resources' | 'all'
     Never touches Clerk account or another user's data.
     """
     cleared = []
@@ -741,22 +946,41 @@ async def clear_user_data(db, clerk_user_id: str, category: str) -> Dict[str, An
             await _del("learner_events")
         if category in ("materials", "all"):
             await _del("materials")
+            await _del("material_chunks")
             await _del("concepts")
             await _del("relationships")
             await _del("questions")
             await _del("attempts")
             await _del("mastery")
+            await _del("flashcards")
+            await _del("study_notes")
+            await _del("podcasts")
+            await _del("tutor_sessions")
+            await _del("assignments")
             await _del("study_paths")
         if category in ("concepts", "all"):
             await _del("concepts")
             await _del("relationships")
             await _del("questions")
             await _del("mastery")
+            await _del("flashcards")
+            await _del("study_notes")
+        if category in ("flashcards", "all"):
+            await _del("flashcards")
+        if category in ("study_notes", "all"):
+            await _del("study_notes")
+        if category in ("podcasts", "all"):
+            await _del("podcasts")
+        if category in ("tutor", "all"):
+            await _del("tutor_sessions")
+        if category in ("assignments", "all"):
+            await _del("assignments")
         if category in ("study_paths", "all"):
             await _del("study_paths")
         if category in ("resources", "all"):
             await _del("resource_feedback")
         return {"cleared": cleared}
+
     # Demo mode
     if category in ("assessments", "all"):
         _DEMO_DB["attempts"] = [d for d in _DEMO_DB.get("attempts", []) if d.get("clerk_user_id") != clerk_user_id]
@@ -767,18 +991,51 @@ async def clear_user_data(db, clerk_user_id: str, category: str) -> Dict[str, An
                 g.update({"xp": 0, "level": 1, "level_name": "Beginner", "achievements": []})
         cleared.append("gamification reset")
     if category in ("materials", "all"):
-        for col in ["materials", "concepts", "relationships", "questions", "attempts", "mastery", "study_paths"]:
+        for col in ["materials", "concepts", "relationships", "questions", "attempts", "mastery", "flashcards", "study_notes", "podcasts", "tutor_sessions", "assignments", "study_paths"]:
             _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("clerk_user_id") != clerk_user_id]
         cleared.append("all learning data cleared")
+    if category in ("concepts", "all"):
+        for col in ["concepts", "relationships", "questions", "mastery", "flashcards", "study_notes"]:
+            _DEMO_DB[col] = [d for d in _DEMO_DB.get(col, []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("concepts cleared")
+    if category in ("flashcards", "all"):
+        _DEMO_DB["flashcards"] = [d for d in _DEMO_DB.get("flashcards", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("flashcards cleared")
+    if category in ("study_notes", "all"):
+        _DEMO_DB["study_notes"] = [d for d in _DEMO_DB.get("study_notes", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("study notes cleared")
+    if category in ("podcasts", "all"):
+        _DEMO_DB["podcasts"] = [d for d in _DEMO_DB.get("podcasts", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("podcasts cleared")
+    if category in ("tutor", "all"):
+        _DEMO_DB["tutor_sessions"] = [d for d in _DEMO_DB.get("tutor_sessions", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("tutor sessions cleared")
+    if category in ("assignments", "all"):
+        _DEMO_DB["assignments"] = [d for d in _DEMO_DB.get("assignments", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("assignments cleared")
+    if category in ("study_paths", "all"):
+        _DEMO_DB["study_paths"] = [d for d in _DEMO_DB.get("study_paths", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("study paths cleared")
+    if category in ("resources", "all"):
+        _DEMO_DB["resource_feedback"] = [d for d in _DEMO_DB.get("resource_feedback", []) if d.get("clerk_user_id") != clerk_user_id]
+        cleared.append("resource feedback cleared")
     return {"cleared": cleared}
 
 
 # ─── Global Search ────────────────────────────────────────────────────────────
 
 async def search_user_data(db, clerk_user_id: str, query: str) -> Dict[str, Any]:
-    """Search across the authenticated user's materials, concepts, questions, and assignments."""
+    """Search across the authenticated user's materials, concepts, questions, assignments, resources, study paths, and activity."""
     q = query.lower().strip()
-    results = {"materials": [], "concepts": [], "questions": [], "assignments": []}
+    results = {
+        "materials": [], 
+        "concepts": [], 
+        "questions": [], 
+        "assignments": [],
+        "resources": [],
+        "study_paths": [],
+        "activity": []
+    }
 
     def _text_match(doc: dict, fields: list) -> bool:
         return any(q in str(doc.get(f, "")).lower() for f in fields)
@@ -813,6 +1070,27 @@ async def search_user_data(db, clerk_user_id: str, query: str) -> Dict[str, Any]
             {"concept_names": {"$in": [query]}}
         ]}).limit(10):
             results["assignments"].append(serialize_doc(doc))
+        # Resources
+        col = db.get_collection("resources")
+        async for doc in col.find({"$or": [
+            {"title": {"$regex": query, "$options": "i"}},
+            {"concept_name": {"$regex": query, "$options": "i"}}
+        ]}).limit(10):
+            results["resources"].append(serialize_doc(doc))
+        # Study Paths
+        col = db.get_collection("study_paths")
+        async for doc in col.find({"clerk_user_id": clerk_user_id, "$or": [
+            {"ordered_concepts.concept_name": {"$regex": query, "$options": "i"}},
+            {"ordered_concepts.reason": {"$regex": query, "$options": "i"}}
+        ]}).limit(5):
+            results["study_paths"].append(serialize_doc(doc))
+        # Activity
+        col = db.get_collection("user_activity")
+        async for doc in col.find({"clerk_user_id": clerk_user_id, "$or": [
+            {"event_type": {"$regex": query, "$options": "i"}},
+            {"entity_type": {"$regex": query, "$options": "i"}}
+        ]}).sort("timestamp", -1).limit(10):
+            results["activity"].append(serialize_doc(doc))
     else:
         # Demo mode – in-memory search
         results["materials"] = [serialize_doc(d) for d in _DEMO_DB.get("materials", [])
@@ -823,6 +1101,12 @@ async def search_user_data(db, clerk_user_id: str, query: str) -> Dict[str, Any]
                                  if d.get("clerk_user_id") == clerk_user_id and _text_match(d, ["question_text", "concept_name"])][:10]
         results["assignments"] = [serialize_doc(d) for d in _DEMO_DB.get("assignments", [])
                                    if d.get("clerk_user_id") == clerk_user_id and _text_match(d, ["title", "description"])][:10]
+        results["resources"] = [serialize_doc(d) for d in _DEMO_DB.get("resources", [])
+                                 if _text_match(d, ["title", "concept_name"])][:10]
+        results["study_paths"] = [serialize_doc(d) for d in _DEMO_DB.get("study_paths", [])
+                                   if d.get("clerk_user_id") == clerk_user_id][:5]
+        results["activity"] = [serialize_doc(d) for d in _DEMO_DB.get("user_activity", [])
+                                if d.get("clerk_user_id") == clerk_user_id and _text_match(d, ["event_type", "entity_type"])][:10]
     return results
 
 
@@ -889,9 +1173,12 @@ async def delete_assignment(db, assignment_id: str, clerk_user_id: str) -> bool:
 async def save_material_chunks(db, material_id: str, chunks_data: List[Dict[str, Any]]) -> bool:
     if not chunks_data:
         return True
+    
+    # Ensure all canonical fields are present
     for c in chunks_data:
-        c["material_id"] = material_id
-        c["created_at"] = datetime.utcnow()
+        c["material_id"] = str(material_id)
+        if "created_at" not in c or not c["created_at"]:
+            c["created_at"] = datetime.utcnow()
     
     if db.is_online:
         col = db.get_collection("material_chunks")
@@ -905,21 +1192,28 @@ async def save_material_chunks(db, material_id: str, chunks_data: List[Dict[str,
 async def get_material_chunks(db, material_id: str) -> List[Dict[str, Any]]:
     if db.is_online:
         col = db.get_collection("material_chunks")
-        docs = await col.find({"material_id": material_id}).to_list(None)
+        docs = await col.find({"material_id": str(material_id)}).to_list(None)
         return serialize_docs(docs)
-    return serialize_docs([d for d in _DEMO_DB.get("material_chunks", []) if str(d.get("material_id")) == material_id])
+    return serialize_docs([d for d in _DEMO_DB.get("material_chunks", []) if str(d.get("material_id")) == str(material_id)])
 
-async def TEMPORARY_VECTOR_SEARCH_FALLBACK(db, clerk_user_id: str, query_embedding: List[float], top_k: int = 5, min_similarity: float = 0.5) -> List[Dict[str, Any]]:
-    """In-memory cosine similarity retrieval for RAG chunks, enforcing strict user ownership."""
+async def TEMPORARY_VECTOR_SEARCH_FALLBACK(db, clerk_user_id: str, query_embedding: List[float], top_k: int = 5, min_similarity: float = 0.5, material_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """In-memory cosine similarity retrieval for RAG chunks, enforcing strict user ownership and optional material scoping."""
     if not query_embedding:
         return []
         
     all_chunks = []
+    query_filter: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+    if material_id:
+        query_filter["material_id"] = str(material_id)
+
     if db.is_online:
         col = db.get_collection("material_chunks")
-        all_chunks = await col.find({"clerk_user_id": clerk_user_id}).to_list(None)
+        all_chunks = await col.find(query_filter).to_list(None)
     else:
-        all_chunks = [d for d in _DEMO_DB.get("material_chunks", []) if d.get("clerk_user_id") == clerk_user_id]
+        all_chunks = [
+            d for d in _DEMO_DB.get("material_chunks", []) 
+            if d.get("clerk_user_id") == clerk_user_id and (not material_id or str(d.get("material_id")) == str(material_id))
+        ]
     
     def cosine_similarity(v1, v2):
         if not v1 or not v2 or len(v1) != len(v2): return 0.0
@@ -934,8 +1228,9 @@ async def TEMPORARY_VECTOR_SEARCH_FALLBACK(db, clerk_user_id: str, query_embeddi
         emb = chunk.get("embedding", [])
         score = cosine_similarity(query_embedding, emb)
         if score >= min_similarity:
-            chunk["similarity_score"] = score
-            scored_chunks.append((score, chunk))
+            chunk_copy = dict(chunk)
+            chunk_copy["similarity_score"] = score
+            scored_chunks.append((score, chunk_copy))
     
     scored_chunks.sort(key=lambda x: x[0], reverse=True)
     return [serialize_doc(chunk) for score, chunk in scored_chunks[:top_k]]
@@ -1307,11 +1602,172 @@ async def delete_podcast(db, podcast_id: str, clerk_user_id: str) -> bool:
         except Exception:
             return False
             
-    podcasts = _DEMO_DB.get("podcasts", [])
-    before_len = len(podcasts)
-    _DEMO_DB["podcasts"] = [p for p in podcasts if not (str(p.get("_id")) == podcast_id and p.get("clerk_user_id") == clerk_user_id)]
-    return len(_DEMO_DB["podcasts"]) < before_len
+    before = len(_DEMO_DB.get("podcasts", []))
+    _DEMO_DB["podcasts"] = [
+        p for p in _DEMO_DB.get("podcasts", [])
+        if not (str(p.get("_id")) == podcast_id and p.get("clerk_user_id") == clerk_user_id)
+    ]
+    return len(_DEMO_DB.get("podcasts", [])) < before
 
 
+# ─── Goals CRUD ──────────────────────────────────────────────────────────────
 
+async def create_goal(db: DatabaseManager, goal) -> Dict[str, Any]:
+    doc = goal.model_dump()
+    doc["created_at"] = datetime.utcnow()
+    doc["updated_at"] = datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("goals")
+        res = await col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return serialize_doc(doc)
+        
+    doc["_id"] = ObjectId()
+    if "goals" not in _DEMO_DB:
+        _DEMO_DB["goals"] = []
+    _DEMO_DB["goals"].append(doc)
+    return serialize_doc(doc)
+
+async def get_goals(db: DatabaseManager, clerk_user_id: str) -> List[Dict[str, Any]]:
+    if db.is_online:
+        col = db.get_collection("goals")
+        cursor = col.find({"clerk_user_id": clerk_user_id}).sort("created_at", -1)
+        docs = await cursor.to_list(length=100)
+        return serialize_docs(docs)
+        
+    results = [g for g in _DEMO_DB.get("goals", []) if g.get("clerk_user_id") == clerk_user_id]
+    results.sort(key=lambda x: x.get("created_at", datetime.min), reverse=True)
+    return serialize_docs(results)
+
+async def get_goal(db: DatabaseManager, goal_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    if db.is_online:
+        col = db.get_collection("goals")
+        try:
+            doc = await col.find_one({"_id": ObjectId(goal_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+            
+    for g in _DEMO_DB.get("goals", []):
+        if str(g.get("_id")) == goal_id and g.get("clerk_user_id") == clerk_user_id:
+            return serialize_doc(g)
+    return None
+
+async def update_goal(db: DatabaseManager, goal_id: str, clerk_user_id: str, update_fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    update_fields.pop("_id", None)
+    update_fields.pop("clerk_user_id", None)
+    update_fields["updated_at"] = datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("goals")
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(goal_id), "clerk_user_id": clerk_user_id},
+                {"$set": update_fields}
+            )
+            if res.matched_count > 0:
+                return await get_goal(db, goal_id, clerk_user_id)
+            return None
+        except Exception:
+            return None
+            
+    for g in _DEMO_DB.get("goals", []):
+        if str(g.get("_id")) == goal_id and g.get("clerk_user_id") == clerk_user_id:
+            g.update(update_fields)
+            return serialize_doc(g)
+    return None
+
+async def delete_goal(db: DatabaseManager, goal_id: str, clerk_user_id: str) -> bool:
+    if db.is_online:
+        col = db.get_collection("goals")
+        try:
+            res = await col.delete_one({"_id": ObjectId(goal_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+            
+    before = len(_DEMO_DB.get("goals", []))
+    _DEMO_DB["goals"] = [
+        g for g in _DEMO_DB.get("goals", [])
+        if not (str(g.get("_id")) == goal_id and g.get("clerk_user_id") == clerk_user_id)
+    ]
+    return len(_DEMO_DB.get("goals", [])) < before
+
+
+# ─── Learning Diagnosis CRUD (Phase 27) ──────────────────────────────────────
+
+async def create_diagnosis(db: DatabaseManager, diagnosis) -> Dict[str, Any]:
+    doc = diagnosis.model_dump()
+    doc["timestamp"] = doc.get("timestamp") or datetime.utcnow()
+    
+    if db.is_online:
+        col = db.get_collection("learning_diagnoses")
+        res = await col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return serialize_doc(doc)
+        
+    doc["_id"] = ObjectId()
+    if "learning_diagnoses" not in _DEMO_DB:
+        _DEMO_DB["learning_diagnoses"] = []
+    _DEMO_DB["learning_diagnoses"].append(doc)
+    return serialize_doc(doc)
+
+async def get_diagnoses(db: DatabaseManager, clerk_user_id: str, concept_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    query: Dict[str, Any] = {"clerk_user_id": clerk_user_id}
+    if concept_id:
+        query["concept_id"] = concept_id
+        
+    if db.is_online:
+        col = db.get_collection("learning_diagnoses")
+        cursor = col.find(query).sort("timestamp", -1)
+        docs = await cursor.to_list(length=200)
+        return serialize_docs(docs)
+        
+    results = [
+        d for d in _DEMO_DB.get("learning_diagnoses", [])
+        if d.get("clerk_user_id") == clerk_user_id
+        and (not concept_id or d.get("concept_id") == concept_id or d.get("target_concept") == concept_id)
+    ]
+    results.sort(key=lambda x: x.get("timestamp", datetime.min), reverse=True)
+    return serialize_docs(results)
+
+async def create_material_chunks(db: DatabaseManager, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not chunks:
+        return []
+    if db.is_online:
+        col = db.get_collection("material_chunks")
+        res = await col.insert_many(chunks)
+        cursor = col.find({"_id": {"$in": res.inserted_ids}})
+        return serialize_docs(await cursor.to_list(length=len(res.inserted_ids)))
+    else:
+        if "material_chunks" not in _DEMO_DB:
+            _DEMO_DB["material_chunks"] = []
+        inserted = []
+        for c in chunks:
+            if "_id" not in c:
+                c["_id"] = ObjectId()
+            _DEMO_DB["material_chunks"].append(c)
+            inserted.append(serialize_doc(c))
+        return inserted
+
+async def get_material_chunks(db: DatabaseManager, material_id: str, clerk_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    query: Dict[str, Any] = {"material_id": str(material_id)}
+    if clerk_user_id:
+        query["clerk_user_id"] = clerk_user_id
+
+    if db.is_online:
+        col = db.get_collection("material_chunks")
+        cursor = col.find(query).sort("chunk_index", 1)
+        return serialize_docs(await cursor.to_list(length=500))
+    else:
+        if "material_chunks" not in _DEMO_DB:
+            _DEMO_DB["material_chunks"] = []
+        chunks = [
+            c for c in _DEMO_DB["material_chunks"] 
+            if str(c.get("material_id")) == str(material_id)
+            and (not clerk_user_id or c.get("clerk_user_id") == clerk_user_id)
+        ]
+        chunks.sort(key=lambda x: x.get("chunk_index", 0))
+        return serialize_docs(chunks)
 

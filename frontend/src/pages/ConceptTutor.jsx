@@ -18,8 +18,106 @@ import {
   Check, 
   Copy,
   AlertCircle,
-  GraduationCap
+  GraduationCap,
+  Code2,
+  Terminal,
+  ChevronRight
 } from 'lucide-react'
+
+// Lightweight Markdown & Code Block Formatter for Rich Chat UI
+function FormattedMessage({ content }) {
+  if (!content) return null
+
+  // Split code blocks from text
+  const parts = content.split(/(```[\s\S]*?```)/g)
+
+  return (
+    <div className="space-y-2.5 text-xs text-slate-200 leading-relaxed font-normal">
+      {parts.map((part, pIdx) => {
+        if (part.startsWith('```') && part.endsWith('```')) {
+          const lines = part.slice(3, -3).trim().split('\n')
+          const language = lines[0].trim().match(/^[a-zA-Z0-9_-]+$/) ? lines[0].trim() : ''
+          const codeBody = language ? lines.slice(1).join('\n') : lines.join('\n')
+
+          return (
+            <div key={pIdx} className="my-2.5 rounded-xl border border-slate-700/80 bg-slate-950 overflow-hidden shadow-md">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900 border-b border-slate-800 text-[10px] text-slate-400 font-mono">
+                <span className="flex items-center gap-1.5 font-bold uppercase">
+                  <Terminal size={12} className="text-indigo-400" />
+                  {language || 'Code'}
+                </span>
+                <button
+                  onClick={() => navigator.clipboard.writeText(codeBody)}
+                  className="hover:text-white transition flex items-center gap-1"
+                >
+                  <Copy size={11} /> Copy
+                </button>
+              </div>
+              <pre className="p-3 text-[11px] font-mono text-emerald-300 overflow-x-auto whitespace-pre">
+                {codeBody}
+              </pre>
+            </div>
+          )
+        }
+
+        // Standard markdown line formatting
+        const paragraphs = part.split(/\n\n+/g)
+        return paragraphs.map((para, p2Idx) => {
+          if (!para.trim()) return null
+
+          // Handle bullet lists
+          if (para.trim().startsWith('- ') || para.trim().startsWith('* ') || para.trim().match(/^\d+\.\s/)) {
+            const listItems = para.trim().split('\n')
+            return (
+              <ul key={`${pIdx}-${p2Idx}`} className="space-y-1 my-1 pl-4 list-disc text-slate-300">
+                {listItems.map((item, lIdx) => {
+                  const itemClean = item.replace(/^[-*\d.]+\s+/, '')
+                  return (
+                    <li key={lIdx} className="leading-relaxed">
+                      <span dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(itemClean) }} />
+                    </li>
+                  )
+                })}
+              </ul>
+            )
+          }
+
+          // Handle Headings (###)
+          if (para.startsWith('### ')) {
+            return (
+              <h4 key={`${pIdx}-${p2Idx}`} className="text-sm font-bold text-indigo-300 pt-1">
+                {para.replace(/^###\s+/, '')}
+              </h4>
+            )
+          }
+          if (para.startsWith('## ')) {
+            return (
+              <h3 key={`${pIdx}-${p2Idx}`} className="text-sm font-extrabold text-white pt-1.5">
+                {para.replace(/^##\s+/, '')}
+              </h3>
+            )
+          }
+
+          return (
+            <p
+              key={`${pIdx}-${p2Idx}`}
+              className="leading-relaxed text-slate-200"
+              dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(para) }}
+            />
+          )
+        })
+      })}
+    </div>
+  )
+}
+
+function formatInlineMarkdown(text) {
+  if (!text) return ''
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-white">$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em class="text-indigo-200">$1</em>')
+    .replace(/`([^`]+)`/g, '<code class="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-mono text-[11px]">$1</code>')
+}
 
 export default function ConceptTutor() {
   const { getToken } = useAuth()
@@ -134,7 +232,7 @@ export default function ConceptTutor() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Tutor response failed')
 
-      // Refresh or update active session
+      // Refresh active session
       const sessRes = await fetch(`http://localhost:8000/api/tutor/sessions/${data.session_id}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
@@ -178,6 +276,23 @@ export default function ConceptTutor() {
       }
     } catch (err) {
       console.error('Delete session error:', err)
+    }
+  }
+
+  const handleDeleteAllSessions = async () => {
+    if (!window.confirm('Delete ALL tutor conversations? This cannot be undone.')) return
+    try {
+      const token = await getToken()
+      const res = await fetch('http://localhost:8000/api/tutor/sessions/all', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (res.ok) {
+        setSessions([])
+        setActiveSession(null)
+      }
+    } catch (err) {
+      console.error('Delete all tutor sessions error:', err)
     }
   }
 
@@ -242,10 +357,10 @@ export default function ConceptTutor() {
       </div>
 
       {/* Main Two-Pane Chat Studio */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[720px]">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[740px]">
         
         {/* Left Column: Session History & Target Concept */}
-        <div className="lg:col-span-3 flex flex-col h-full bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-4">
+        <div className="lg:col-span-3 flex flex-col h-full bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-4">
           
           <button
             onClick={handleStartNewSession}
@@ -258,7 +373,7 @@ export default function ConceptTutor() {
           {/* Concept Focus Dropdown */}
           <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
             <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-              Tutoring Subject Focus
+              Subject Focus
             </label>
             <select
               value={selectedConcept}
@@ -274,9 +389,19 @@ export default function ConceptTutor() {
 
           {/* Previous Sessions */}
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 pt-2">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-              Recent Conversations ({sessions.length})
-            </span>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                Conversations ({sessions.length})
+              </span>
+              {sessions.length > 0 && (
+                <button
+                  onClick={handleDeleteAllSessions}
+                  className="text-[10px] text-red-400 hover:text-red-300 font-semibold transition"
+                >
+                  Clear All
+                </button>
+              )}
+            </div>
 
             {sessions.length === 0 ? (
               <p className="text-xs text-slate-500 text-center py-6">No previous conversations.</p>
@@ -290,8 +415,8 @@ export default function ConceptTutor() {
                     onClick={() => setActiveSession(sess)}
                     className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between group ${
                       isSelected 
-                        ? 'bg-indigo-600/15 border-indigo-500/50 text-white' 
-                        : 'bg-slate-950/40 border-slate-850 text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+                        ? 'bg-indigo-600/20 border-indigo-500/50 text-white' 
+                        : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:bg-slate-900 hover:text-slate-200'
                     }`}
                   >
                     <div className="flex items-center space-x-2 truncate pr-2">
@@ -313,13 +438,13 @@ export default function ConceptTutor() {
         </div>
 
         {/* Right Column: Interactive Chat Dialogue Stream */}
-        <div className="lg:col-span-9 flex flex-col h-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
+        <div className="lg:col-span-9 flex flex-col h-full bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
           
           {/* Active Header */}
-          <div className="p-4 border-b border-slate-800 bg-slate-950/40 flex items-center justify-between">
+          <div className="p-4 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 rounded-full bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center font-bold text-xs">
-                AI
+              <div className="w-9 h-9 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center font-bold text-xs shadow-inner">
+                <Bot size={18} />
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white">
@@ -331,42 +456,44 @@ export default function ConceptTutor() {
               </div>
             </div>
 
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-              <Zap size={11} /> +5 XP per Inquiry
+            <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
+              <Zap size={12} /> +5 XP per Inquiry
             </span>
           </div>
 
           {/* Messages Stream */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             {(!activeSession || (activeSession.messages || []).length === 0) ? (
-              <div className="h-full flex flex-col items-center justify-center text-center space-y-4 max-w-md mx-auto">
-                <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center shadow-lg">
-                  <Lightbulb size={28} />
+              <div className="h-full flex flex-col items-center justify-center text-center space-y-4 max-w-lg mx-auto py-12">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500/20 via-purple-500/20 to-pink-500/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center shadow-xl">
+                  <Sparkles size={32} />
                 </div>
-                <div className="space-y-1">
-                  <h3 className="text-lg font-bold text-white">Ready for Socratic Exploration</h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Ask a question, request a conceptual derivation, or test your reasoning on <strong className="text-indigo-300">{selectedConcept || 'your curriculum'}</strong>.
+                <div className="space-y-1.5">
+                  <h3 className="text-lg font-extrabold text-white">Interactive Socratic Session</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto">
+                    Ask questions, explore edge cases, or request step-by-step conceptual breakdowns on <strong className="text-indigo-300">{selectedConcept || 'your active curriculum'}</strong>.
                   </p>
                 </div>
 
-                {/* Quick Prompts */}
-                <div className="grid grid-cols-1 gap-2 w-full pt-2">
+                {/* Quick Prompt Cards */}
+                <div className="grid grid-cols-1 gap-2.5 w-full pt-4">
                   <button
                     onClick={() => {
                       setInputMessage(`Why is ${selectedConcept || 'this concept'} designed this way, and what fundamental problem does it solve?`)
                     }}
-                    className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 text-left text-xs text-slate-300 hover:border-indigo-500/40 hover:text-white transition cursor-pointer"
+                    className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 hover:border-indigo-500/40 text-left text-xs text-slate-300 hover:text-white transition flex items-center justify-between group cursor-pointer"
                   >
-                    💡 "Why is {selectedConcept || 'this concept'} designed this way?"
+                    <span>💡 "Why is {selectedConcept || 'this concept'} designed this way?"</span>
+                    <ChevronRight size={14} className="text-slate-600 group-hover:text-indigo-400 transition" />
                   </button>
                   <button
                     onClick={() => {
-                      setInputMessage(`Give me a tricky real-world scenario where ${selectedConcept || 'this concept'} might fail if misconfigured.`)
+                      setInputMessage(`Give me a practical real-world scenario where ${selectedConcept || 'this concept'} is applied, with potential misconceptions.`)
                     }}
-                    className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 text-left text-xs text-slate-300 hover:border-indigo-500/40 hover:text-white transition cursor-pointer"
+                    className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 hover:border-indigo-500/40 text-left text-xs text-slate-300 hover:text-white transition flex items-center justify-between group cursor-pointer"
                   >
-                    🎯 "Challenge me with a real-world scenario."
+                    <span>🎯 "Show me a real-world scenario and common misconceptions."</span>
+                    <ChevronRight size={14} className="text-slate-600 group-hover:text-indigo-400 transition" />
                   </button>
                 </div>
               </div>
@@ -376,41 +503,46 @@ export default function ConceptTutor() {
                 return (
                   <div
                     key={msg.id || idx}
-                    className={`flex items-start gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}
+                    className={`flex items-start gap-3.5 ${isUser ? 'justify-end' : 'justify-start'}`}
                   >
                     {!isUser && (
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 text-white flex items-center justify-center flex-shrink-0 text-xs shadow-md">
+                      <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 via-purple-600 to-pink-600 text-white flex items-center justify-center flex-shrink-0 shadow-md">
                         <Bot size={16} />
                       </div>
                     )}
 
                     <div
-                      className={`max-w-2xl rounded-2xl p-4 space-y-2 relative group shadow-lg ${
+                      className={`max-w-3xl rounded-2xl p-4.5 space-y-2 relative group shadow-xl ${
                         isUser
-                          ? 'bg-indigo-600 text-white rounded-tr-sm'
-                          : 'bg-slate-950/80 border border-slate-800 text-slate-200 rounded-tl-sm'
+                          ? 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white rounded-tr-sm border border-indigo-500/30'
+                          : 'bg-slate-950/90 border border-slate-800 text-slate-200 rounded-tl-sm'
                       }`}
                     >
-                      <div className="text-xs leading-relaxed whitespace-pre-line prose prose-invert max-w-none">
-                        {msg.content}
-                      </div>
+                      {isUser ? (
+                        <div className="text-xs leading-relaxed whitespace-pre-line font-medium">
+                          {msg.content}
+                        </div>
+                      ) : (
+                        <FormattedMessage content={msg.content} />
+                      )}
 
                       {!isUser && (
-                        <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px] text-slate-500">
-                          <span>Socratic Guidance</span>
+                        <div className="pt-2.5 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-500">
+                          <span className="font-semibold text-slate-400">Socratic Concept Guide</span>
                           <button
                             onClick={() => handleCopy(msg.id || idx, msg.content)}
-                            className="hover:text-slate-300 transition cursor-pointer"
+                            className="hover:text-slate-200 transition cursor-pointer flex items-center gap-1"
                             title="Copy reply"
                           >
                             {copiedId === (msg.id || idx) ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                            <span>{copiedId === (msg.id || idx) ? 'Copied' : 'Copy'}</span>
                           </button>
                         </div>
                       )}
                     </div>
 
                     {isUser && (
-                      <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 text-slate-300 flex items-center justify-center flex-shrink-0 text-xs">
+                      <div className="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 flex items-center justify-center flex-shrink-0 text-xs font-bold">
                         {user?.firstName?.[0] || 'U'}
                       </div>
                     )}
@@ -420,13 +552,13 @@ export default function ConceptTutor() {
             )}
 
             {sending && (
-              <div className="flex items-start gap-3 justify-start animate-fade-in">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 text-white flex items-center justify-center flex-shrink-0 text-xs">
+              <div className="flex items-start gap-3.5 justify-start animate-fade-in">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white flex items-center justify-center flex-shrink-0">
                   <Bot size={16} />
                 </div>
-                <div className="bg-slate-950/80 border border-slate-800 text-slate-400 rounded-2xl rounded-tl-sm p-4 text-xs flex items-center space-x-2">
+                <div className="bg-slate-950/90 border border-slate-800 text-slate-400 rounded-2xl rounded-tl-sm p-4 text-xs flex items-center space-x-2 shadow-lg">
                   <RotateCw size={14} className="animate-spin text-indigo-400" />
-                  <span>Synthesizing Socratic response...</span>
+                  <span>Synthesizing structured Socratic explanation...</span>
                 </div>
               </div>
             )}
@@ -435,7 +567,7 @@ export default function ConceptTutor() {
           </div>
 
           {/* Message Input Box */}
-          <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-950/60">
+          <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-800 bg-slate-950/80">
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -443,14 +575,15 @@ export default function ConceptTutor() {
                 onChange={(e) => setInputMessage(e.target.value)}
                 placeholder={selectedConcept ? `Ask the Socratic Tutor about ${selectedConcept}...` : "Ask a concept question..."}
                 disabled={sending}
-                className="flex-1 px-4 py-3 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition"
+                className="flex-1 px-4 py-3.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition shadow-inner"
               />
               <button
                 type="submit"
                 disabled={!inputMessage.trim() || sending}
-                className="p-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20 disabled:opacity-40 transition-all active:scale-95 cursor-pointer flex-shrink-0"
+                className="px-5 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 disabled:opacity-40 transition-all active:scale-95 cursor-pointer flex items-center gap-2 font-bold text-xs flex-shrink-0"
               >
-                <Send size={16} />
+                <span>Send</span>
+                <Send size={14} />
               </button>
             </div>
           </form>

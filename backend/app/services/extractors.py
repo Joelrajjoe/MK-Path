@@ -110,6 +110,7 @@ class ContentExtractor:
 
 class PDFExtractor(ContentExtractor):
     async def extract(self, file_bytes: bytes, mime_type: str) -> Dict[str, Any]:
+        doc = None
         try:
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page_count = doc.page_count
@@ -128,19 +129,45 @@ class PDFExtractor(ContentExtractor):
             
             text = text.strip()
             
-            # Detect image-only or scanned PDF
+            # Detect image-only or scanned PDF (< 50 characters extracted)
             if len(text) < 50 and page_count > 0:
                 logger.info("PDF direct text extraction returned less than 50 chars. Triggering OCRExtractor...")
+                if doc:
+                    doc.close()
                 ocr_extractor = OCRExtractor()
                 ocr_result = await ocr_extractor.extract(file_bytes, mime_type)
                 ocr_result["metadata"]["page_count"] = page_count
                 return ocr_result
                 
-            doc.close()
+            if doc:
+                doc.close()
+            
+            if not text:
+                return {
+                    "source_type": "pdf",
+                    "text": "",
+                    "segments": [],
+                    "metadata": {"page_count": page_count},
+                    "extraction_status": "failed",
+                    "ocr_status": "n/a",
+                    "transcription_status": "n/a",
+                    "extraction_method": "direct_text",
+                    "error_code": "EMPTY_DOCUMENT"
+                }
             
             if not validate_text_quality(text):
-                logger.warning("PDF extraction failed quality validation.")
-                raise ValueError("EXTRACTION_QUALITY_LOW")
+                logger.warning("PDF extraction text quality low.")
+                return {
+                    "source_type": "pdf",
+                    "text": text,
+                    "segments": segments,
+                    "metadata": {"page_count": page_count},
+                    "extraction_status": "failed",
+                    "ocr_status": "n/a",
+                    "transcription_status": "n/a",
+                    "extraction_method": "direct_text",
+                    "error_code": "EXTRACTION_QUALITY_LOW"
+                }
             
             return {
                 "source_type": "pdf",
@@ -155,8 +182,13 @@ class PDFExtractor(ContentExtractor):
                 "extraction_method": "direct_text"
             }
         except Exception as e:
+            if doc:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
             logger.error(f"PDF direct text extraction failed: {e}")
-            error_code = "EXTRACTION_QUALITY_LOW" if str(e) == "EXTRACTION_QUALITY_LOW" else "failed"
+            is_empty_err = not file_bytes or "empty" in str(e).lower()
             return {
                 "source_type": "pdf",
                 "text": "",
@@ -166,7 +198,7 @@ class PDFExtractor(ContentExtractor):
                 "ocr_status": "n/a",
                 "transcription_status": "n/a",
                 "extraction_method": "direct_text",
-                "error_code": error_code
+                "error_code": "EMPTY_DOCUMENT" if is_empty_err else "CORRUPTED_DOCUMENT"
             }
 
 

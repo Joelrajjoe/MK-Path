@@ -136,6 +136,25 @@ export default function Flashcards() {
     }
   }
 
+  const handleDeleteAllCards = async () => {
+    if (!window.confirm('Are you sure you want to delete ALL flashcards? This cannot be undone.')) return
+    
+    try {
+      const token = await getToken()
+      const res = await fetch('http://localhost:8000/api/flashcards/all', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (res.ok) {
+        setFlashcards([])
+        setDueCards([])
+        setSuccessMsg('All flashcards deleted.')
+      }
+    } catch (err) {
+      console.error('Delete all flashcards error:', err)
+    }
+  }
+
   // Start Study Session
   const startSession = (cardsToStudy) => {
     if (!cardsToStudy || cardsToStudy.length === 0) return
@@ -230,6 +249,15 @@ export default function Flashcards() {
         </div>
 
         <div className="flex items-center gap-3">
+          {flashcards.length > 0 && (
+            <button
+              onClick={handleDeleteAllCards}
+              className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-500/20 font-medium text-xs transition-all cursor-pointer"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete All Cards</span>
+            </button>
+          )}
           <button
             onClick={() => setShowGenModal(true)}
             className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-medium text-sm transition-all shadow-md shadow-indigo-600/20 active:scale-95 cursor-pointer"

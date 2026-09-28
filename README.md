@@ -32,25 +32,22 @@ Gamification (XP Logs, Level Ranks, and Achievements)
 
 ## 2. Key Features
 
-### Implemented (MVP Complete)
+### Implemented (Core & Advanced Intelligence)
 *   **Real-time Authentication**: Email/Password and Google Social authentication powered by Clerk (`@clerk/react`). Protected frontend routes and JWT RS256 token validation on FastAPI requests.
 *   **Multimodal Material Ingestion**: Unified ingestion interface supporting PDFs, plain TXT files, scanned images/OCR, audio transcriptions (MP3, WAV, M4A), and video audio extraction (MP4, AVI, WEBM) up to 25MB. Dynamically redirects scanned PDFs to OCR and transcribes audiovisual logs using Pydantic-validated models.
-*   **AI Concept Mining**: Dual-provider concept mapping (Gemini JSON mode -> Groq `llama-3.3-70b-versatile` -> local heuristic fallback) that identifies concept difficulty, prerequisites, and relevance weightings.
-*   **RAG (Retrieval-Augmented Generation) Pipeline**: Ingested materials are chunked (500-word blocks), embedded using Gemini `text-embedding-004`, and queried using cosine similarity to ground the AI with specific context, eliminating hallucinations.
-*   **Context-Aware Personalization**: AI prompts strictly utilize user metadata (learning goals, target role, preferred difficulty) from `UserPreferences` to dynamically adjust generated assessments and extracted concepts.
-*   **Interactive Knowledge Graph**: React Flow canvas with custom glowing node rings representing mastery levels, zoom/pan viewport controls, and detail sliding drawers.
-*   **Adaptive Assessment Quiz**: Context-grounded assessment generator (Gemini -> Groq -> Local Distractors) that creates targeted MCQs using the user's uploaded material.
-*   **Confidence-Corrected Mastery**: Computes rolling 4-term mastery scores:
-    `Mastery = 0.50 * Accuracy + 0.20 * Confidence + 0.15 * Response Speed + 0.15 * Previous Mastery`
-*   **Personalized Study Path Timeline**: Prioritizes concept sequences by low mastery, exam weight, industry weight, and urgency. Automatically locks target concepts if their prerequisite scores are under 70%.
-*   **Curated Resource Recommendations**: Dynamic catalog matching documentation and video tutorials matching weak concepts.
-*   **Gamification**: XP points trigger level upgrades (Beginner, Learner, Explorer, Skilled, Master) and unlock achievements.
-*   **Speech Recognition Accessibility**: Web Speech API floating panel supporting voice synthesis and microphone commands ("Start quiz", "Show study path", "Read question").
-*   **Controlled Presentation Seeding**: "Seed Demo Dataset" button loads mock data scoped strictly to the current Clerk ID to enable immediate platform review.
-
-### Planned (Post-MVP)
-*   **Multimodal Audio Ingestion**: Voice and lecture transcription loaders.
-*   **Collaborative Graph Filtering**: Recommending study paths based on peer performance cohorts.
+*   **AI Concept Mining & Relationships**: Dual-provider concept mapping (Gemini / Groq / local heuristic fallback) that extracts structured concepts, prerequisites, exam weights, and industry weights.
+*   **RAG (Retrieval-Augmented Generation) Pipeline**: Ingested materials are chunked, embedded using Gemini embeddings (`models/gemini-embedding-001`), and semantically retrieved with cosine similarity for strict factual grounding.
+*   **Hierarchical Knowledge Graph**: React Flow canvas with custom glowing node rings representing mastery levels, zoom/pan viewport controls, depth-based topological layering, and detail sliding drawers.
+*   **AI Socratic Concept Tutor**: Interactive conversational tutoring interface with markdown rendering, syntax-highlighted code blocks, prompt chips, and grounding in user materials.
+*   **NotebookLM-Inspired Audio Podcast Studio**: Multi-speaker conversational audio synthesis featuring host dialogues (Alex & Sam), live browser speech playback, pitch/rate modulation, and full transcript review.
+*   **Adaptive Study Path & Dynamic Prerequisite Gating**: Graph-aware and reinforcement learning planners calculating topological unlock readiness, ensuring foundational concepts are mastered before advanced topics.
+*   **Lifecycle Assignment System**: AI-generated conceptual assignments supporting auto-saved drafts, submission evaluation, multi-question feedback, mastery evidence tracking, and XP awards.
+*   **AI Flashcard Decks (SM-2 Spaced Repetition)**: Context-grounded flashcards scheduled using the SM-2 algorithm to optimize retention intervals.
+*   **Comprehensive Study Notes & Mind Maps**: Synthesized deep-dive study summaries with interactive, hierarchical mind-map trees.
+*   **Goal Readiness & Skill Gap Intelligence**: Benchmark tracking for target careers and certifications, calculating readiness scores and prerequisite bottlenecks.
+*   **Misconception & Prerequisite Diagnosis**: Deterministic diagnosis engine identifying root misconception causes, decay rates, and BKT uncertainty.
+*   **Trust-Aware Resource Recommendations**: Dynamically matched educational guides and verified documentation (DevDocs, interactive sandboxes) tailored to weak concepts.
+*   **Cascade & Bulk Data Management**: Safe, user-scoped data purging with cascade deletions and bulk "Delete All" controls for materials, flashcards, notes, podcasts, tutor sessions, and assignments.
 
 ---
 

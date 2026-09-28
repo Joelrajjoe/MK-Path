@@ -12,6 +12,19 @@ class UserProfile(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+from enum import Enum
+
+# Explicit Material Ingestion Lifecycle States
+class MaterialStatus(str, Enum):
+    UPLOADED = "UPLOADED"
+    EXTRACTING = "EXTRACTING"
+    EXTRACTED = "EXTRACTED"
+    CHUNKING = "CHUNKING"
+    EMBEDDING = "EMBEDDING"
+    READY = "READY"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+
 class Material(BaseModel):
     clerk_user_id: str = Field(...)
     title: str = Field(..., description="Name or title of study material")
@@ -19,10 +32,10 @@ class Material(BaseModel):
     file_size: int = Field(..., description="File size in bytes")
     content_type: str = Field(..., description="Content mime-type (e.g. application/pdf)")
     raw_text: str = Field(..., description="Plaintext content extracted from file")
-    status: str = Field("processing", description="'processing', 'processed', or 'failed'")
+    status: str = Field(MaterialStatus.READY.value, description="MaterialStatus: UPLOADED, EXTRACTING, EXTRACTED, CHUNKING, EMBEDDING, READY, PARTIAL, FAILED")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
-    # Extended properties for Multimodal Content Ingestion (Phase 12)
+    # Extended properties for Multimodal Content Ingestion (Phase 12 & 24)
     source_type: str = Field("pdf", description="pdf, txt, image, audio, video")
     mime_type: str = Field("application/pdf", description="MIME type of uploaded file")
     duration: Optional[float] = Field(None, description="Duration in seconds for audio/video")
@@ -31,24 +44,25 @@ class Material(BaseModel):
     ocr_status: str = Field("n/a", description="n/a, processing, completed, failed")
     extraction_method: str = Field("direct_text", description="direct_text, ocr, transcription")
     segments: List[Dict[str, Any]] = Field(default_factory=list, description="Extracted segments or timestamps layout blocks")
+    error_message: Optional[str] = Field(None, description="Error reason if FAILED or PARTIAL")
 
 
 
 class Concept(BaseModel):
     clerk_user_id: str = Field(...)
-    material_id: str = Field(..., description="Reference to materials collection _id")
+    material_id: Optional[str] = Field(None, description="Reference to materials collection _id (optional for user-defined concepts)")
     name: str = Field(..., description="Name of the extracted concept")
     description: str = Field(...)
-    exam_relevance: int = Field(..., ge=0, le=100)
-    industry_relevance: int = Field(..., ge=0, le=100)
-    difficulty: str = Field(..., description="basic, intermediate, advanced")
+    exam_relevance: int = Field(80, ge=0, le=100)
+    industry_relevance: int = Field(80, ge=0, le=100)
+    difficulty: str = Field("intermediate", description="basic, intermediate, advanced")
     prerequisites: List[str] = Field(default_factory=list, description="List of prerequisite concept names")
     source_refs: List[Dict[str, Any]] = Field(default_factory=list, description="References to document chunks")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class Relationship(BaseModel):
     clerk_user_id: str = Field(...)
-    material_id: str = Field(..., description="Reference to materials collection _id")
+    material_id: Optional[str] = Field(None, description="Reference to materials collection _id")
     source_concept_name: str = Field(...)
     target_concept_name: str = Field(...)
     relationship_type: str = Field(..., description="e.g. prerequisite_of, builds_on")
@@ -72,6 +86,7 @@ class Attempt(BaseModel):
     clerk_user_id: str = Field(...)
     concept_id: str = Field(..., description="Reference to concepts collection _id")
     question_id: str = Field(..., description="Reference to questions collection _id")
+    concept_name: Optional[str] = Field(None, description="Denormalized concept name for fast querying")
     selected_option_index: int = Field(...)
     is_correct: bool = Field(...)
     confidence: int = Field(..., ge=1, le=5, description="Learner self-reported confidence 1-5")
@@ -159,12 +174,16 @@ class AttemptSubmit(BaseModel):
 class UserPreferences(BaseModel):
     """Extended learner profile preferences stored in MongoDB (separate from Clerk identity)."""
     clerk_user_id: str = Field(...)
+    display_name: Optional[str] = None
     preferred_name: Optional[str] = None
     learning_goal: Optional[str] = None
     target_role: Optional[str] = None
+    target_exam: Optional[str] = None
+    current_level: Optional[str] = Field("Beginner", description="Beginner, Intermediate, Advanced, Expert")
     preferred_difficulty: str = Field("intermediate", description="basic, intermediate, advanced")
     daily_study_target_minutes: int = Field(30, ge=5, le=480)
     preferred_session_duration_minutes: int = Field(25, ge=5, le=120)
+    deadline: Optional[datetime] = None
     exam_target: Optional[str] = None
     industry_interests: List[str] = Field(default_factory=list)
     preferred_resource_types: List[str] = Field(default_factory=list, description="video, article, documentation")
@@ -178,19 +197,21 @@ class UserPreferences(BaseModel):
 
 
 class MaterialChunk(BaseModel):
-    """Semantic chunk of a study material with vector embedding."""
-    chunk_id: str = Field(...)
-    material_id: str = Field(...)
-    clerk_user_id: str = Field(...)
-    sequence: int = Field(...)
-    text: str = Field(...)
-    embedding: List[float] = Field(default_factory=list)
-    embedding_model: Optional[str] = Field(None)
+    """Canonical chunk representation of study material with vector embeddings and source grounding."""
+    chunk_id: str = Field(..., description="Unique chunk identifier, e.g. chunk_hash or uuid")
+    material_id: str = Field(..., description="Foreign key reference to materials collection")
+    clerk_user_id: str = Field(..., description="Owner user ID for strict security scoping")
+    text: str = Field(..., description="Normalized text content of chunk")
+    page: Optional[int] = Field(None, description="Page number where text originated")
+    section: Optional[str] = Field(None, description="Section heading or structural anchor")
+    source_type: str = Field("pdf", description="pdf, txt, image, audio, video")
+    content_hash: str = Field(..., description="SHA-256 hash of the chunk text")
+    embedding_model: str = Field("models/gemini-embedding-001", description="Model name used for vector embeddings")
+    embedding: List[float] = Field(default_factory=list, description="Vector representation")
     embedding_status: str = Field("completed", description="completed, failed")
-    page: Optional[int] = Field(None)
-    section: Optional[str] = Field(None)
-    start_time: Optional[float] = Field(None)
-    end_time: Optional[float] = Field(None)
+    sequence: int = Field(0, description="Sequential index of chunk in document")
+    start_time: Optional[float] = Field(None, description="Timestamp for audio/video transcriptions")
+    end_time: Optional[float] = Field(None, description="Timestamp for audio/video transcriptions")
     token_count: Optional[int] = Field(None)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -392,8 +413,185 @@ class PodcastOverview(BaseModel):
 
 class GeneratePodcastRequest(BaseModel):
     material_id: Optional[str] = None
-    concept_ids: Optional[List[str]] = Field(default_factory=list)
-    style: str = Field("dynamic", description="dynamic (engaging & lively), academic (deep analytical), or exam_prep (high-yield rapid recall)")
+    concept_ids: Optional[List[str]] = None
+    duration_minutes: Optional[float] = 3.5
+    focus_topic: Optional[str] = None
+    style: Optional[str] = "dynamic"
+
+
+class RequiredSkill(BaseModel):
+    name: str = Field(..., description="Canonical or user-defined skill/concept name")
+    required_level: float = Field(75.0, ge=0.0, le=100.0, description="Target mastery score needed for goal readiness (0-100)")
+    source: str = Field("verified_system_mapping", description="learner_defined, verified_system_mapping, ai_suggested")
+    weight: float = Field(1.0, ge=0.1, le=5.0, description="Importance weighting of skill toward goal")
+
+class Goal(BaseModel):
+    clerk_user_id: str = Field(...)
+    title: str = Field(..., description="Target role or learning goal title, e.g. 'Data Analyst'")
+    description: Optional[str] = Field(None, description="Detailed target description")
+    target_role: Optional[str] = None
+    target_exam: Optional[str] = None
+    target_date: Optional[datetime] = None
+    required_skills: List[RequiredSkill] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class SkillGap(BaseModel):
+    skill_name: str
+    required_level: float
+    current_mastery: float
+    gap: float
+    prerequisite_readiness: float
+    evidence_strength: str  # high, moderate, low, none
+    priority: float
+    status: str  # MASTERED, READY, NEEDS_IMPROVEMENT, BLOCKED_BY_PREREQUISITE, INSUFFICIENT_EVIDENCE
+    source: str
+    unmet_prerequisites: List[str] = Field(default_factory=list)
+    explanation: str
+
+class GoalGapAnalysis(BaseModel):
+    goal_id: str
+    goal_title: str
+    overall_readiness_score: float  # 0 to 100
+    status: str  # READY, IN_PROGRESS, AT_RISK, NOT_STARTED
+    skills: List[SkillGap]
+    recommended_focus_skill: Optional[str] = None
+    analyzed_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ─── Phase 27: Misconception & Prerequisite Diagnosis Models ─────────────────
+
+class DiagnosisType(str, Enum):
+    CONCEPT_WEAKNESS = "CONCEPT_WEAKNESS"
+    PREREQUISITE_WEAKNESS = "PREREQUISITE_WEAKNESS"
+    RECURRING_MISCONCEPTION = "RECURRING_MISCONCEPTION"
+    CONFIDENCE_MISMATCH = "CONFIDENCE_MISMATCH"
+    RETENTION_DECAY = "RETENTION_DECAY"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+class DiagnosisEvidence(BaseModel):
+    attempt_count: int = 0
+    accuracy: float = 0.0
+    avg_confidence: float = 0.0
+    avg_response_time_seconds: float = 0.0
+    bkt_probability: Optional[float] = None
+    bkt_uncertainty: Optional[float] = None
+    days_since_review: Optional[float] = None
+    prerequisite_states: Dict[str, float] = Field(default_factory=dict)
+    recurring_distractor_indices: List[int] = Field(default_factory=list)
+
+
+class LearningDiagnosis(BaseModel):
+    diagnosis_id: Optional[str] = None
+    clerk_user_id: str
+    target_concept: str
+    concept_id: Optional[str] = None
+    diagnosis_type: DiagnosisType
+    suspected_root_concept: Optional[str] = None
+    evidence: DiagnosisEvidence
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this diagnosis based on evidence volume")
+    reason: str = Field(..., description="Explainable rationale: why it happened")
+    recommended_action: str = Field(..., description="Actionable recommendation: what to do next")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DiagnosisRequest(BaseModel):
+    concept_id: Optional[str] = None
+    concept_name: Optional[str] = None
+    question_id: Optional[str] = None
+    selected_option_index: Optional[int] = None
+    confidence: Optional[int] = None
+    response_time_seconds: Optional[float] = None
+
+
+# ─── Phase 28: What-If Learning Simulator Models ─────────────────────────────
+
+class SimulationRequest(BaseModel):
+    goal_id: Optional[str] = None
+    simulated_mastery_map: Dict[str, float] = Field(..., description="Map of concept_name or concept_id -> simulated mastery (0-100)")
+
+
+class UnlockedConcept(BaseModel):
+    concept_name: str
+    reason: str
+
+
+class SimulationResult(BaseModel):
+    is_simulation: bool = Field(True, description="Always True: SIMULATION ONLY guarantee")
+    goal_id: Optional[str] = None
+    goal_title: Optional[str] = None
+    current_goal_readiness: float
+    simulated_goal_readiness: float
+    readiness_delta: float
+    resolved_skill_gaps: List[str]
+    remaining_skill_gaps: List[SkillGap]
+    newly_unlocked_concepts: List[UnlockedConcept]
+    blocked_concepts: List[str]
+    changed_study_path: List[Dict[str, Any]]
+    next_best_action: str
+    simulated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ─── Phase 29: Next-Best-Learning-Action Models ─────────────────────────────
+
+class ActionType(str, Enum):
+    LEARN = "LEARN"
+    REVIEW = "REVIEW"
+    PRACTICE = "PRACTICE"
+    ASSESS = "ASSESS"
+    RETRY = "RETRY"
+    COMPLETE_ASSIGNMENT = "COMPLETE_ASSIGNMENT"
+    READ_RESOURCE = "READ_RESOURCE"
+    ADVANCE = "ADVANCE"
+
+
+class NextBestActionRecommendation(BaseModel):
+    action_type: ActionType
+    concept_id: str
+    concept_name: Optional[str] = None
+    priority: float = Field(..., ge=0.0, le=100.0, description="Deterministic priority score (0-100)")
+    reason: str = Field(..., description="Explainable rationale derived from learner state")
+    evidence: Dict[str, Any] = Field(default_factory=dict, description="Concrete data points driving the decision")
+    expected_effect: str = Field(..., description="Projected outcome of executing this action")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in recommendation accuracy")
+    resource_id: Optional[str] = None
+    assignment_id: Optional[str] = None
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ─── Phase 30: Mastery Evidence Chain Models ────────────────────────────────
+
+class MasteryEvidenceAttempt(BaseModel):
+    attempt_id: Optional[str] = None
+    question_text: Optional[str] = None
+    is_correct: bool
+    confidence: Optional[int] = None
+    response_time_seconds: Optional[float] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MasteryEvidenceChain(BaseModel):
+    concept_id: str
+    concept_name: str
+    current_mastery: float = Field(..., ge=0.0, le=100.0)
+    category: str = Field("IN_PROGRESS", description="NOVICE | DEVELOPING | PROFICIENT | MASTERED")
+    previous_mastery: float = 0.0
+    retention_adjustment: float = 0.0
+    accuracy: float = 0.0
+    correct_attempts_count: int = 0
+    total_attempts_count: int = 0
+    avg_confidence: float = 0.0
+    median_response_time_seconds: float = 0.0
+    bkt_probability: Optional[float] = None
+    bkt_uncertainty: Optional[float] = None
+    recent_attempts: List[MasteryEvidenceAttempt] = Field(default_factory=list)
+    assessment_dates: List[str] = Field(default_factory=list)
+    explanation: str = Field(..., description="Plain-English explanation: Why is my mastery X%?")
+    is_insufficient_evidence: bool = False
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 
 
 

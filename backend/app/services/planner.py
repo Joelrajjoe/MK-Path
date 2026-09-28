@@ -34,18 +34,20 @@ class BaselinePlanner(StudyPathPlanner):
         decayed_map = {}
         for c in concepts:
             c_id = str(c["_id"])
-            m = mastery_map.get(c_id)
+            c_name = c["name"]
+            m = mastery_map.get(c_id) or mastery_map.get(c_name)
             if m:
                 # 5% decay per day
                 days = (now - m["last_reviewed_at"]).total_seconds() / (24 * 3600)
                 dec_score = m["mastery_score"] * math.exp(-0.05 * days)
             else:
                 dec_score = 0.0
-            decayed_map[c["name"]] = dec_score
+            decayed_map[c_name] = dec_score
 
         for c in concepts:
             c_id = str(c["_id"])
-            m = mastery_map.get(c_id)
+            c_name = c["name"]
+            m = mastery_map.get(c_id) or mastery_map.get(c_name)
             
             if m:
                 days = (now - m["last_reviewed_at"]).total_seconds() / (24 * 3600)
@@ -58,8 +60,8 @@ class BaselinePlanner(StudyPathPlanner):
                 next_review = now - timedelta(days=1)
 
             priority_score = (100.0 - decayed_score) * 1.5
-            priority_score += c["exam_relevance"] * 0.5
-            priority_score += c["industry_relevance"] * 0.3
+            priority_score += c.get("exam_relevance", 80) * 0.5
+            priority_score += c.get("industry_relevance", 80) * 0.3
 
             is_overdue = now > next_review
             if is_overdue:
@@ -84,7 +86,7 @@ class BaselinePlanner(StudyPathPlanner):
                     reason = f"Critical priority: concept mastery is currently Weak ({decayed_score:.0f}%)."
                 elif is_overdue:
                     reason = "Review urgency: concept is overdue for Spaced Repetition review."
-                elif c["exam_relevance"] >= 80:
+                elif c.get("exam_relevance", 80) >= 80:
                     reason = "High Exam Relevance target curriculum topic."
                 else:
                     reason = "Ongoing study path topic progression."
@@ -121,17 +123,19 @@ class GraphAwarePlanner(StudyPathPlanner):
         decayed_map = {}
         for c in concepts:
             c_id = str(c["_id"])
-            m = mastery_map.get(c_id)
+            c_name = c["name"]
+            m = mastery_map.get(c_id) or mastery_map.get(c_name)
             if m:
                 days = (now - m["last_reviewed_at"]).total_seconds() / (24 * 3600)
                 dec_score = m["mastery_score"] * math.exp(-0.05 * days)
             else:
                 dec_score = 0.0
-            decayed_map[c["name"]] = dec_score
+            decayed_map[c_name] = dec_score
 
         for c in concepts:
             c_id = str(c["_id"])
-            m = mastery_map.get(c_id)
+            c_name = c["name"]
+            m = mastery_map.get(c_id) or mastery_map.get(c_name)
             
             if m:
                 days = (now - m["last_reviewed_at"]).total_seconds() / (24 * 3600)
