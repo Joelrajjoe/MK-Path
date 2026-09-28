@@ -92,6 +92,20 @@ async def shutdown_db_client():
 
 # --- Public Endpoints ---
 
+@app.get("/")
+async def root():
+    """
+    Root landing response for Render/Vercel health checks and API index.
+    """
+    return {
+        "name": "MK-Path API",
+        "version": "1.0.0",
+        "status": "healthy",
+        "docs_url": "/docs",
+        "health_check": "/api/health"
+    }
+
+@app.get("/health")
 @app.get("/api/health")
 async def health_check():
     """
