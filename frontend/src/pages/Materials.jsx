@@ -437,15 +437,35 @@ export default function Materials() {
                           {mat.extraction_method}
                         </span>
                       )}
-                      {mat.status === 'processed' ? (
-                        <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/10 px-2 py-0.5 rounded font-semibold">
-                          Processed
-                        </span>
-                      ) : (
-                        <span className="text-[10px] bg-rose-500/10 text-rose-400 border border-rose-500/10 px-2 py-0.5 rounded font-semibold">
-                          Failed
-                        </span>
-                      )}
+                      {(() => {
+                        const s = (mat.status || '').toUpperCase();
+                        if (s === 'READY' || s === 'EXTRACTED' || s === 'PROCESSED') {
+                          return (
+                            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-semibold">
+                              Ready
+                            </span>
+                          );
+                        }
+                        if (s === 'CHUNKING' || s === 'EMBEDDING' || s === 'EXTRACTING' || s === 'UPLOADED') {
+                          return (
+                            <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded font-semibold animate-pulse">
+                              Processing
+                            </span>
+                          );
+                        }
+                        if (s === 'PARTIAL') {
+                          return (
+                            <span className="text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 px-2 py-0.5 rounded font-semibold">
+                              Ready (Partial)
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="text-[10px] bg-rose-500/10 text-rose-400 border border-rose-500/20 px-2 py-0.5 rounded font-semibold">
+                            Failed
+                          </span>
+                        );
+                      })()}
                       <button className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition">
                         <Eye size={14} />
                       </button>
@@ -529,12 +549,12 @@ export default function Materials() {
             {activeTab === 'text' ? (
               // --- Tab 1: Raw Text Output ---
               <div className="p-5 font-mono text-xs leading-relaxed text-slate-300 select-text whitespace-pre-wrap flex-1">
-                {selectedMaterial.status === 'failed' ? (
+                {String(selectedMaterial.status).toUpperCase() === 'FAILED' ? (
                   <div className="flex flex-col items-center justify-center h-full text-center space-y-3 py-20">
                     <AlertTriangle size={32} className="text-rose-400" />
                     <p className="font-sans font-bold text-slate-200">Text Extraction Failed</p>
                     <p className="font-sans text-[11px] text-slate-500 max-w-xs">
-                      This document could not be parsed. This occurs if the PDF consists entirely of images (scanned document) and lacks metadata.
+                      {selectedMaterial.error_message || 'This document could not be parsed. Ensure the file contains readable text or high-contrast scanned content.'}
                     </p>
                   </div>
                 ) : selectedMaterial.raw_text ? (
@@ -546,7 +566,7 @@ export default function Materials() {
             ) : (
               // --- Tab 2: AI Concepts Miner ---
               <div className="p-5 flex-1 flex flex-col space-y-4">
-                {selectedMaterial.status === 'failed' ? (
+                {String(selectedMaterial.status).toUpperCase() === 'FAILED' ? (
                   <div className="text-center py-10 space-y-2">
                     <AlertTriangle size={24} className="text-rose-400 mx-auto" />
                     <p className="font-bold text-sm text-slate-300">Extraction Unavailable</p>
