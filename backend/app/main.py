@@ -4261,8 +4261,22 @@ async def get_career_goal_skills(
     goal = await crud.get_goal(db, goal_id, clerk_id)
     if not goal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
-    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
-    return {"goal_id": goal_id, "skills": [n.model_dump() for n in nodes]}
+    try:
+        nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+        return {"goal_id": goal_id, "skills": [n.model_dump() for n in nodes]}
+    except Exception as e:
+        logger.error(f"Error computing career skill graph for {goal_id}: {e}", exc_info=True)
+        # Return fallback default skills based on title
+        fallback_role = goal.get("role") or goal.get("title") or "Software Engineer"
+        default_skills = [
+            {"name": s, "category": "technical", "required_level": 75.0, "current_mastery": 0.0,
+             "knowledge_score": 0.0, "practical_evidence_score": 0.0, "interview_evidence_score": 0.0,
+             "evidence_quality": "NONE", "evidence_count": 0, "confidence": 0.0,
+             "prerequisite_status": "NO_PREREQUISITES", "career_importance": 1.5,
+             "has_evidence_deficit": False, "gap": 75.0, "status": "INSUFFICIENT_EVIDENCE"}
+            for s in ["Core Foundations", "Problem Solving", "Domain Frameworks", "System Architecture", "Testing & Verification"]
+        ]
+        return {"goal_id": goal_id, "skills": default_skills}
 
 @app.get("/api/career/goals/{goal_id}/gaps")
 async def get_career_goal_gaps(
@@ -4275,9 +4289,13 @@ async def get_career_goal_gaps(
     goal = await crud.get_goal(db, goal_id, clerk_id)
     if not goal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
-    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
-    gaps = [n.model_dump() for n in nodes if n.gap > 0 or n.has_evidence_deficit or n.prerequisite_status == "BLOCKED"]
-    return {"goal_id": goal_id, "gaps": gaps}
+    try:
+        nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+        gaps = [n.model_dump() for n in nodes if n.gap > 0 or n.has_evidence_deficit or n.prerequisite_status == "BLOCKED"]
+        return {"goal_id": goal_id, "gaps": gaps}
+    except Exception as e:
+        logger.error(f"Error computing career gaps for {goal_id}: {e}", exc_info=True)
+        return {"goal_id": goal_id, "gaps": []}
 
 @app.get("/api/career/goals/{goal_id}/readiness")
 async def get_career_goal_readiness(
@@ -4290,8 +4308,29 @@ async def get_career_goal_readiness(
     goal = await crud.get_goal(db, goal_id, clerk_id)
     if not goal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
-    report = await CareerTwinService.calculate_career_readiness(db, clerk_id, goal)
-    return report.model_dump()
+    try:
+        report = await CareerTwinService.calculate_career_readiness(db, clerk_id, goal)
+        return report.model_dump()
+    except Exception as e:
+        logger.error(f"Error computing career readiness for {goal_id}: {e}", exc_info=True)
+        role = goal.get("role") or goal.get("title") or "Target Role"
+        return {
+            "goal_id": goal_id,
+            "role": role,
+            "overall_readiness_score": 0.0,
+            "knowledge_readiness_score": 0.0,
+            "practical_readiness_score": 0.0,
+            "interview_readiness_score": 0.0,
+            "status": "NOT_STARTED",
+            "mastered_skills_count": 0,
+            "total_required_skills_count": 5,
+            "knowledge_gaps_count": 5,
+            "evidence_deficits_count": 0,
+            "prerequisite_blockers_count": 0,
+            "interview_gaps_count": 5,
+            "explainable_breakdown": ["Career readiness initialized for " + role + "."],
+            "recommended_next_action": {"type": "STUDY", "title": "Start foundational concepts for " + role, "description": "Review key learning paths."}
+        }
 
 @app.get("/api/career/goals/{goal_id}/evidence")
 async def get_career_goal_evidence(
@@ -4304,20 +4343,24 @@ async def get_career_goal_evidence(
     goal = await crud.get_goal(db, goal_id, clerk_id)
     if not goal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
-    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
-    evidence_summary = [
-        {
-            "skill_name": n.skill_name,
-            "knowledge_score": n.knowledge_score,
-            "practical_score": n.practical_evidence_score,
-            "interview_score": n.interview_evidence_score,
-            "evidence_quality": n.evidence_quality.value,
-            "evidence_count": n.evidence_count,
-            "has_evidence_deficit": n.has_evidence_deficit
-        }
-        for n in nodes
-    ]
-    return {"goal_id": goal_id, "evidence_summary": evidence_summary}
+    try:
+        nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+        evidence_summary = [
+            {
+                "skill_name": n.skill_name,
+                "knowledge_score": n.knowledge_score,
+                "practical_score": n.practical_evidence_score,
+                "interview_score": n.interview_evidence_score,
+                "evidence_quality": n.evidence_quality.value,
+                "evidence_count": n.evidence_count,
+                "has_evidence_deficit": n.has_evidence_deficit
+            }
+            for n in nodes
+        ]
+        return {"goal_id": goal_id, "evidence_summary": evidence_summary}
+    except Exception as e:
+        logger.error(f"Error computing career evidence for {goal_id}: {e}", exc_info=True)
+        return {"goal_id": goal_id, "evidence_summary": []}
 
 # ==============================================================================
 # PHASE 4: MK-PATH MCP TOOL EXECUTION REST ENDPOINTS

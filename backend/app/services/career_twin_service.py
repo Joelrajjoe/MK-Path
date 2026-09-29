@@ -237,10 +237,24 @@ Return a valid JSON object matching this exact structure:
         skill_nodes: List[CareerSkillNode] = []
 
         for req in required_skills:
-            s_name = req.get("name", "") if isinstance(req, dict) else req
-            req_level = float(req.get("required_level", 75.0) if isinstance(req, dict) else 75.0)
-            category = str(req.get("category", "technical") if isinstance(req, dict) else "technical")
-            importance = float(req.get("career_importance", 1.2) if isinstance(req, dict) else 1.2)
+            if isinstance(req, dict):
+                s_name = str(req.get("name") or "").strip()
+                req_level = float(req.get("required_level", 75.0) or 75.0)
+                category = str(req.get("category", "technical") or "technical")
+                importance = float(req.get("career_importance", 1.2) or 1.2)
+            elif hasattr(req, "name"):
+                s_name = str(getattr(req, "name", "") or "").strip()
+                req_level = float(getattr(req, "required_level", 75.0) or 75.0)
+                category = str(getattr(req, "category", "technical") or "technical")
+                importance = float(getattr(req, "career_importance", 1.2) or 1.2)
+            else:
+                s_name = str(req or "").strip()
+                req_level = 75.0
+                category = "technical"
+                importance = 1.2
+
+            if not s_name:
+                continue
 
             norm_name = s_name.lower()
             m_doc = mastery_map.get(norm_name)
