@@ -23,6 +23,7 @@ import ExportStudio from './pages/ExportStudio'
 import StudyNotes from './pages/StudyNotes'
 import ConceptTutor from './pages/ConceptTutor'
 import PersonalLearningAgent from './pages/PersonalLearningAgent'
+import CareerTwin from './pages/CareerTwin'
 import AudioPodcastStudio from './pages/AudioPodcastStudio'
 import NotFound from './pages/NotFound'
 
@@ -40,6 +41,7 @@ export default function App() {
           <Route element={<ProtectedRoute />}>
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="agent" element={<PersonalLearningAgent />} />
+            <Route path="career" element={<CareerTwin />} />
             <Route path="materials" element={<Materials />} />
             <Route path="knowledge-graph" element={<KnowledgeGraph />} />
             <Route path="podcast" element={<AudioPodcastStudio />} />

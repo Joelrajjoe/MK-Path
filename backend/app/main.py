@@ -4152,5 +4152,223 @@ async def get_youtube_study_notes(
         "notes": notes
     }
 
+# ==============================================================================
+# PHASE 3: CAREER TWIN REST ENDPOINTS
+# ==============================================================================
+
+from .services.career_twin_service import CareerTwinService
+from .services.career_twin_models import CareerTwinGoal
+
+class AnalyzeJobRequest(BaseModel):
+    job_description: str
+    role_hint: Optional[str] = None
+
+class CreateCareerGoalRequest(BaseModel):
+    role: str
+    company_or_industry: Optional[str] = None
+    experience_level: Optional[str] = "Mid-Level"
+    location_preference: Optional[str] = "Remote"
+    target_date: Optional[datetime] = None
+    job_description_raw: Optional[str] = None
+    job_url: Optional[str] = None
+    extracted_skills: Optional[List[dict]] = None
+
+@app.get("/api/career/goals")
+async def get_career_goals(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve all active career goals for the authenticated learner."""
+    clerk_id = current_user["clerk_user_id"]
+    goals = await crud.get_goals(db, clerk_id)
+    return {"goals": goals}
+
+@app.post("/api/career/analyze-job")
+async def analyze_job_description(
+    req: AnalyzeJobRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Parses a job description to extract technical competencies, frameworks, soft skills, and interview topics."""
+    result = await CareerTwinService.analyze_job_description(req.job_description, req.role_hint)
+    return result.model_dump()
+
+@app.post("/api/career/goals")
+async def create_career_goal(
+    req: CreateCareerGoalRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Create or extend a persistent Career Twin target goal."""
+    clerk_id = current_user["clerk_user_id"]
+    
+    extracted_skills = req.extracted_skills or []
+    if req.job_description_raw and not extracted_skills:
+        analysis = await CareerTwinService.analyze_job_description(req.job_description_raw, req.role)
+        extracted_skills = analysis.extracted_skill_nodes
+
+    goal_doc = {
+        "clerk_user_id": clerk_id,
+        "title": req.role,
+        "role": req.role,
+        "company_or_industry": req.company_or_industry,
+        "experience_level": req.experience_level,
+        "location_preference": req.location_preference,
+        "target_date": req.target_date,
+        "job_description_raw": req.job_description_raw,
+        "job_url": req.job_url,
+        "extracted_skills": extracted_skills,
+        "required_skills": [
+            {"name": s.get("name"), "required_level": s.get("required_level", 75.0), "source": "job_description", "weight": s.get("career_importance", 1.2)}
+            for s in extracted_skills
+        ] if extracted_skills else []
+    }
+    
+    if db.is_online:
+        col = db.get_collection("goals")
+        goal_doc["created_at"] = datetime.utcnow()
+        goal_doc["updated_at"] = datetime.utcnow()
+        res = await col.insert_one(goal_doc)
+        goal_doc["_id"] = str(res.inserted_id)
+    else:
+        goal_doc["_id"] = "career_goal_" + str(len(crud._DEMO_DB.get("goals", [])) + 1)
+        goal_doc["created_at"] = datetime.utcnow()
+        goal_doc["updated_at"] = datetime.utcnow()
+        crud._DEMO_DB.setdefault("goals", []).append(goal_doc)
+
+    return {"goal": crud.serialize_doc(goal_doc), "message": "Career Goal created successfully"}
+
+@app.get("/api/career/goals/{goal_id}")
+async def get_career_goal(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve single career goal by ID."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
+    return {"goal": goal}
+
+@app.get("/api/career/goals/{goal_id}/skills")
+async def get_career_goal_skills(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get multi-dimensional Career Skill Graph with Knowledge, Practical, and Interview scores."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
+    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+    return {"goal_id": goal_id, "skills": [n.model_dump() for n in nodes]}
+
+@app.get("/api/career/goals/{goal_id}/gaps")
+async def get_career_goal_gaps(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get knowledge gaps, evidence deficits, and prerequisite blockers for a career goal."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
+    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+    gaps = [n.model_dump() for n in nodes if n.gap > 0 or n.has_evidence_deficit or n.prerequisite_status == "BLOCKED"]
+    return {"goal_id": goal_id, "gaps": gaps}
+
+@app.get("/api/career/goals/{goal_id}/readiness")
+async def get_career_goal_readiness(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get explainable Career Twin readiness report, trajectory, and recommended next action."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
+    report = await CareerTwinService.calculate_career_readiness(db, clerk_id, goal)
+    return report.model_dump()
+
+@app.get("/api/career/goals/{goal_id}/evidence")
+async def get_career_goal_evidence(
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Get itemized evidence chain backing Career Twin skills."""
+    clerk_id = current_user["clerk_user_id"]
+    goal = await crud.get_goal(db, goal_id, clerk_id)
+    if not goal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Career goal not found")
+    nodes = await CareerTwinService.get_career_skill_graph(db, clerk_id, goal)
+    evidence_summary = [
+        {
+            "skill_name": n.skill_name,
+            "knowledge_score": n.knowledge_score,
+            "practical_score": n.practical_evidence_score,
+            "interview_score": n.interview_evidence_score,
+            "evidence_quality": n.evidence_quality.value,
+            "evidence_count": n.evidence_count,
+            "has_evidence_deficit": n.has_evidence_deficit
+        }
+        for n in nodes
+    ]
+    return {"goal_id": goal_id, "evidence_summary": evidence_summary}
+
+# ==============================================================================
+# PHASE 4: MK-PATH MCP TOOL EXECUTION REST ENDPOINTS
+# ==============================================================================
+
+from .mcp.server import MCPToolRegistry
+
+class MCPExecuteRequest(BaseModel):
+    tool_name: str
+    arguments: Optional[dict] = None
+
+@app.get("/api/mcp/tools")
+async def list_mcp_tools(current_user: dict = Depends(get_current_user)):
+    """List available MCP tools for the authenticated learner."""
+    return {
+        "tools": [
+            {"name": "mkpath_get_learner_profile", "type": "READ", "description": "Get authenticated learner profile"},
+            {"name": "mkpath_get_goals", "type": "READ", "description": "Get user learning & career goals"},
+            {"name": "mkpath_get_mastery", "type": "READ", "description": "Get BKT concept mastery scores & probabilities"},
+            {"name": "mkpath_get_skill_gap", "type": "READ", "description": "Analyze persistent skill gaps for a goal"},
+            {"name": "mkpath_get_diagnosis", "type": "READ", "description": "Get misconception & prerequisite diagnoses"},
+            {"name": "mkpath_search_materials", "type": "READ", "description": "Vector search in user's study materials"},
+            {"name": "mkpath_search_knowledge_graph", "type": "READ", "description": "Fetch user concepts & relationships"},
+            {"name": "mkpath_get_next_action", "type": "READ", "description": "Compute highest-impact Next Best Action"},
+            {"name": "mkpath_get_career_requirements", "type": "READ", "description": "Get Career Twin readiness & evidence"},
+            {"name": "mkpath_search_current_industry", "type": "READ", "description": "Live web search for latest industry tech"},
+            {"name": "mkpath_get_assignments", "type": "READ", "description": "Fetch pending/completed assignments"},
+            {"name": "mkpath_create_assignment", "type": "WRITE", "description": "Create a new targeted practice assignment"}
+        ]
+    }
+
+@app.post("/api/mcp/execute")
+async def execute_mcp_tool(
+    req: MCPExecuteRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Execute an authorized MK-Path MCP tool within user scope."""
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        result = await MCPToolRegistry.execute_tool(
+            db=db,
+            clerk_user_id=clerk_id,
+            tool_name=req.tool_name,
+            arguments=req.arguments or {}
+        )
+        return {"success": True, "tool_name": req.tool_name, "result": result}
+    except Exception as e:
+        logger.error(f"MCP Tool execution error ({req.tool_name}): {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 
 

@@ -1,6 +1,9 @@
 import logging
 from typing import Dict, Any, List, Optional, Tuple
-from neo4j import GraphDatabase
+try:
+    from neo4j import GraphDatabase
+except ImportError:
+    GraphDatabase = None
 from ..config import settings
 
 logger = logging.getLogger("mkpath.neo4j")
