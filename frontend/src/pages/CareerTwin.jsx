@@ -49,14 +49,18 @@ export default function CareerTwin() {
       })
       if (res.ok) {
         const data = await res.json()
-        setGoals(data.goals || [])
-        if (data.goals && data.goals.length > 0) {
-          setActiveGoal(data.goals[0])
+        const fetchedGoals = data.goals || []
+        setGoals(fetchedGoals)
+        if (fetchedGoals.length > 0) {
+          setActiveGoal(fetchedGoals[0])
+        } else {
+          setLoading(false)
         }
+      } else {
+        setLoading(false)
       }
     } catch (e) {
       console.error('Error fetching career goals:', e)
-    } finally {
       setLoading(false)
     }
   }
@@ -93,6 +97,8 @@ export default function CareerTwin() {
         }
       } catch (e) {
         console.error('Error fetching goal details:', e)
+      } finally {
+        setLoading(false)
       }
     }
 
@@ -192,10 +198,12 @@ export default function CareerTwin() {
         <div className="flex items-center space-x-3 overflow-x-auto pb-2 border-b border-slate-800">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider pl-1">Target Goals:</span>
           {goals.map((g) => {
-            const isSel = activeGoal && (activeGoal._id === g._id || activeGoal.id === g.id)
+            const gId = String(g._id || g.id || '')
+            const activeId = String(activeGoal?._id || activeGoal?.id || '')
+            const isSel = activeGoal && (gId === activeId || g.title === activeGoal.title || g.role === activeGoal.role)
             return (
               <button
-                key={g._id || g.id}
+                key={gId || g.title}
                 onClick={() => setActiveGoal(g)}
                 className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
                   isSel
@@ -234,74 +242,72 @@ export default function CareerTwin() {
       ) : (
         <div className="space-y-8">
           {/* Readiness Dashboard KPI Cards */}
-          {readinessReport && (
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              {/* Overall Readiness */}
-              <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2 relative overflow-hidden">
-                <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
-                  <span>Overall Readiness</span>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    readinessReport.overall_readiness_score >= 80 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
-                    readinessReport.overall_readiness_score >= 50 ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' :
-                    'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                  }`}>
-                    {readinessReport.status}
-                  </span>
-                </div>
-                <div className="text-3xl font-extrabold text-white">
-                  {readinessReport.overall_readiness_score}%
-                </div>
-                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                  <div
-                    className="bg-indigo-500 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${readinessReport.overall_readiness_score}%` }}
-                  />
-                </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {/* Overall Readiness */}
+            <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2 relative overflow-hidden">
+              <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
+                <span>Overall Readiness</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                  (readinessReport?.overall_readiness_score || 0) >= 80 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
+                  (readinessReport?.overall_readiness_score || 0) >= 50 ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' :
+                  'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                }`}>
+                  {readinessReport?.status || 'IN_PROGRESS'}
+                </span>
               </div>
-
-              {/* Knowledge Score */}
-              <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
-                <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
-                  <span>Knowledge Mastery</span>
-                  <BookOpen size={14} className="text-indigo-400" />
-                </div>
-                <div className="text-2xl font-bold text-white">
-                  {readinessReport.knowledge_readiness_score}%
-                </div>
-                <p className="text-[11px] text-slate-500">Verified via quizzes & BKT</p>
+              <div className="text-3xl font-extrabold text-white">
+                {readinessReport?.overall_readiness_score ?? 0}%
               </div>
-
-              {/* Practical / Project Evidence */}
-              <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
-                <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
-                  <span>Practical Evidence</span>
-                  <Code2 size={14} className="text-purple-400" />
-                </div>
-                <div className="text-2xl font-bold text-white">
-                  {readinessReport.practical_readiness_score}%
-                </div>
-                <p className="text-[11px] text-slate-500">
-                  {readinessReport.evidence_deficits_count > 0 ? (
-                    <span className="text-amber-400 font-semibold">{readinessReport.evidence_deficits_count} Evidence Deficits</span>
-                  ) : (
-                    'Verified code & assignments'
-                  )}
-                </p>
-              </div>
-
-              {/* Interview Simulation */}
-              <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
-                <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
-                  <span>Interview Readiness</span>
-                  <Award size={14} className="text-sky-400" />
-                </div>
-                <div className="text-2xl font-bold text-white">
-                  {readinessReport.interview_readiness_score}%
-                </div>
-                <p className="text-[11px] text-slate-500">Technical role Q&A</p>
+              <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-indigo-500 h-full rounded-full transition-all duration-500"
+                  style={{ width: `${readinessReport?.overall_readiness_score || 0}%` }}
+                />
               </div>
             </div>
-          )}
+
+            {/* Knowledge Score */}
+            <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
+              <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
+                <span>Knowledge Mastery</span>
+                <BookOpen size={14} className="text-indigo-400" />
+              </div>
+              <div className="text-2xl font-bold text-white">
+                {readinessReport?.knowledge_readiness_score ?? 0}%
+              </div>
+              <p className="text-[11px] text-slate-500">Verified via quizzes & BKT</p>
+            </div>
+
+            {/* Practical / Project Evidence */}
+            <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
+              <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
+                <span>Practical Evidence</span>
+                <Code2 size={14} className="text-purple-400" />
+              </div>
+              <div className="text-2xl font-bold text-white">
+                {readinessReport?.practical_readiness_score ?? 0}%
+              </div>
+              <p className="text-[11px] text-slate-500">
+                {(readinessReport?.evidence_deficits_count || 0) > 0 ? (
+                  <span className="text-amber-400 font-semibold">{readinessReport.evidence_deficits_count} Evidence Deficits</span>
+                ) : (
+                  'Verified code & assignments'
+                )}
+              </p>
+            </div>
+
+            {/* Interview Simulation */}
+            <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl space-y-2">
+              <div className="flex justify-between items-center text-xs text-slate-400 font-medium">
+                <span>Interview Readiness</span>
+                <Award size={14} className="text-sky-400" />
+              </div>
+              <div className="text-2xl font-bold text-white">
+                {readinessReport?.interview_readiness_score ?? 0}%
+              </div>
+              <p className="text-[11px] text-slate-500">Technical role Q&A</p>
+            </div>
+          </div>
 
           {/* Recommended Next Action Banner */}
           {readinessReport?.recommended_next_action && (

@@ -1645,9 +1645,17 @@ async def get_goal(db: DatabaseManager, goal_id: str, clerk_user_id: str) -> Opt
         col = db.get_collection("goals")
         try:
             doc = await col.find_one({"_id": ObjectId(goal_id), "clerk_user_id": clerk_user_id})
-            return serialize_doc(doc)
+            if doc:
+                return serialize_doc(doc)
         except Exception:
-            return None
+            pass
+        try:
+            doc = await col.find_one({"_id": goal_id, "clerk_user_id": clerk_user_id})
+            if doc:
+                return serialize_doc(doc)
+        except Exception:
+            pass
+        return None
             
     for g in _DEMO_DB.get("goals", []):
         if str(g.get("_id")) == goal_id and g.get("clerk_user_id") == clerk_user_id:

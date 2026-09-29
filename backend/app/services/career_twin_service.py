@@ -141,11 +141,44 @@ Return a valid JSON object matching this exact structure:
         - Evidence Deficit (High Knowledge, 0 Practical)
         """
         required_skills = goal.get("extracted_skills", []) or goal.get("required_skills", [])
-        if not required_skills and goal.get("target_role"):
-            # Provide standard baseline if none provided
+        if not required_skills:
+            target_role = goal.get("role") or goal.get("title") or "Software Engineer"
+            # Auto-infer appropriate competencies based on role title
+            role_lower = target_role.lower()
+            if "machine learning" in role_lower or "ml" in role_lower or "ai" in role_lower:
+                skills_list = [
+                    "Supervised Learning", "Neural Networks", "Transformers & LLMs", 
+                    "Feature Engineering", "Model Evaluation & Metrics", "PyTorch / TensorFlow", "MLOps & Deployment"
+                ]
+            elif "data" in role_lower:
+                skills_list = [
+                    "SQL & Data Modeling", "Python / Pandas", "Statistical Analysis", 
+                    "Data Visualization", "Data Pipelines & ETL", "A/B Testing"
+                ]
+            elif "backend" in role_lower:
+                skills_list = [
+                    "API Design & REST", "Database Optimization", "Distributed Systems", 
+                    "Asynchronous Programming", "Docker & Containers", "Authentication & Security"
+                ]
+            elif "frontend" in role_lower:
+                skills_list = [
+                    "React & State Management", "TypeScript", "Responsive UI/UX", 
+                    "Web Performance Optimization", "REST & GraphQL Integration", "Accessibility (a11y)"
+                ]
+            elif "devops" in role_lower or "cloud" in role_lower:
+                skills_list = [
+                    "Docker & Kubernetes", "CI/CD Pipelines", "Infrastructure as Code (Terraform)", 
+                    "Linux Administration", "Cloud Architecture (AWS/GCP)", "Monitoring & Observability"
+                ]
+            else:
+                skills_list = [
+                    "Data Structures", "Algorithms", "Database Design", 
+                    "API Architecture", "Testing & CI/CD", "System Design"
+                ]
+
             required_skills = [
                 {"name": s, "category": "technical", "required_level": 75.0, "career_importance": 1.5}
-                for s in ["Data Structures", "Algorithms", "Database Design", "API Architecture", "Testing & CI/CD"]
+                for s in skills_list
             ]
 
         # 1. Fetch Mastery
