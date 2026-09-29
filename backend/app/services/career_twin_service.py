@@ -187,12 +187,16 @@ Return a valid JSON object matching this exact structure:
             col_m = db.get_collection("mastery")
             cursor = col_m.find({"clerk_user_id": clerk_user_id})
             async for doc in cursor:
-                mastery_map[doc.get("concept_name", "").lower()] = doc
+                cname = str(doc.get("concept_name") or "").strip().lower()
+                if cname:
+                    mastery_map[cname] = doc
         else:
             from ..crud import _DEMO_DB
             for doc in _DEMO_DB.get("mastery", []):
                 if doc.get("clerk_user_id") == clerk_user_id:
-                    mastery_map[doc.get("concept_name", "").lower()] = doc
+                    cname = str(doc.get("concept_name") or "").strip().lower()
+                    if cname:
+                        mastery_map[cname] = doc
 
         # 2. Fetch Attempts / Quizzes (Knowledge Evidence)
         attempts_map: Dict[str, List[Dict[str, Any]]] = {}
@@ -200,14 +204,14 @@ Return a valid JSON object matching this exact structure:
             col_a = db.get_collection("attempts")
             cursor = col_a.find({"clerk_user_id": clerk_user_id})
             async for doc in cursor:
-                cname = doc.get("concept_name", "").lower()
+                cname = str(doc.get("concept_name") or "").strip().lower()
                 if cname:
                     attempts_map.setdefault(cname, []).append(doc)
         else:
             from ..crud import _DEMO_DB
             for doc in _DEMO_DB.get("attempts", []):
                 if doc.get("clerk_user_id") == clerk_user_id:
-                    cname = doc.get("concept_name", "").lower()
+                    cname = str(doc.get("concept_name") or "").strip().lower()
                     if cname:
                         attempts_map.setdefault(cname, []).append(doc)
 
@@ -217,14 +221,16 @@ Return a valid JSON object matching this exact structure:
             col_asg = db.get_collection("assignments")
             cursor = col_asg.find({"clerk_user_id": clerk_user_id})
             async for doc in cursor:
-                cnames = [c.lower() for c in doc.get("concept_names", [])]
+                raw_cnames = doc.get("concept_names") or []
+                cnames = [str(c).strip().lower() for c in raw_cnames if c]
                 for cn in cnames:
                     assignments_map.setdefault(cn, []).append(doc)
         else:
             from ..crud import _DEMO_DB
             for doc in _DEMO_DB.get("assignments", []):
                 if doc.get("clerk_user_id") == clerk_user_id:
-                    cnames = [c.lower() for c in doc.get("concept_names", [])]
+                    raw_cnames = doc.get("concept_names") or []
+                    cnames = [str(c).strip().lower() for c in raw_cnames if c]
                     for cn in cnames:
                         assignments_map.setdefault(cn, []).append(doc)
 
@@ -302,7 +308,9 @@ Return a valid JSON object matching this exact structure:
             unmet = []
             if prereqs:
                 for p in prereqs:
-                    pm = mastery_map.get(p.lower())
+                    if not p:
+                        continue
+                    pm = mastery_map.get(str(p).lower())
                     pscore = float(pm.get("mastery_score", 0.0)) if pm else 0.0
                     if pscore < 70.0:
                         unmet.append(f"{p} ({round(pscore, 1)}%)")
