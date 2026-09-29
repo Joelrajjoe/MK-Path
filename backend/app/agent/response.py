@@ -63,46 +63,59 @@ class AgentResponseEngine:
                 w.get("standards", "")
             ))
 
-        # 2. Call Gemini Primary
+        # 2. Call Gemini Primary with multi-model fallback
         content_text = None
-        gemini_keys = settings.GEMINI_API_KEYS or ([settings.GEMINI_API_KEY] if settings.GEMINI_API_KEY else [])
+        gemini_keys = settings.GEMINI_API_KEYS or ([settings.GEMINI_API_KEY_RAW] if settings.GEMINI_API_KEY_RAW else [])
+        gemini_models = [settings.GEMINI_MODEL, "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        seen_models = set()
+        model_candidates = [m for m in gemini_models if m and not (m in seen_models or seen_models.add(m))]
+
+        # Format conversation history
+        contents = []
+        for msg in conversation_history[-4:]:
+            role = "user" if msg.role == "user" else "model"
+            contents.append(f"{role.upper()}: {msg.content}")
+
+        contents.append(f"USER: {user_message}\n\n[CONTEXT DOSSIER]:\n{prompt}")
+        prompt_payload = "\n\n".join(contents)
 
         for key in gemini_keys:
-            try:
-                client = genai.Client(api_key=key)
-                model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
-                
-                # Format conversation history
-                contents = []
-                for msg in conversation_history[-4:]:
-                    role = "user" if msg.role == "user" else "model"
-                    contents.append(f"{role.upper()}: {msg.content}")
-
-                contents.append(f"USER: {user_message}\n\n[CONTEXT DOSSIER]:\n{prompt}")
-
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=model_name,
-                    contents="\n\n".join(contents),
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.3
+            if content_text:
+                break
+            client = genai.Client(api_key=key)
+            for model_name in model_candidates:
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            client.models.generate_content,
+                            model=model_name,
+                            contents=prompt_payload,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                temperature=0.4
+                            )
+                        ),
+                        timeout=6.0
                     )
-                )
-                if response and response.text:
-                    content_text = response.text
-                    break
-            except Exception as e:
-                logger.warning(f"Gemini Agent synthesis error: {e}")
+                    if response and response.text:
+                        content_text = response.text
+                        logger.info(f"Agent response generated via Gemini model: {model_name}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Gemini Agent synthesis error with model {model_name}: {e}")
 
         # 3. Fallback to Groq if Gemini fails
         if not content_text and settings.GROQ_API_KEY:
-            try:
-                content_text = await cls._generate_groq_fallback(
-                    system_instruction, user_message, prompt, conversation_history
-                )
-            except Exception as e:
-                logger.warning(f"Groq Agent synthesis fallback error: {e}")
+            for groq_model in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "allam-2-7b"]:
+                try:
+                    content_text = await cls._generate_groq_fallback(
+                        system_instruction, user_message, prompt, conversation_history, model=groq_model
+                    )
+                    if content_text:
+                        logger.info(f"Agent response generated via Groq fallback ({groq_model})")
+                        break
+                except Exception as e:
+                    logger.warning(f"Groq Agent synthesis fallback error with {groq_model}: {e}")
 
         # 4. Fallback to Rule-Based Grounded Template
         if not content_text:
@@ -165,7 +178,8 @@ class AgentResponseEngine:
         system_instruction: str,
         user_message: str,
         context_prompt: str,
-        history: List[AgentChatMessage]
+        history: List[AgentChatMessage],
+        model: str = "qwen/qwen3.8-27b"
     ) -> str:
         messages = [{"role": "system", "content": system_instruction}]
         for m in history[-3:]:
@@ -177,7 +191,7 @@ class AgentResponseEngine:
         })
 
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": model,
             "messages": messages,
             "temperature": 0.3
         }
@@ -191,37 +205,43 @@ class AgentResponseEngine:
             "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=20
+            timeout=25
         )
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        raise Exception(f"Groq API returned {response.status_code}")
+        raise Exception(f"Groq API returned {response.status_code}: {response.text}")
 
     @classmethod
     def _generate_deterministic_fallback(cls, ctx: LearnerContext, query: str, intent: AgentIntent) -> str:
-        if intent == AgentIntent.CAREER_GUIDANCE:
-            roles = ", ".join(ctx.target_roles) or "Software & AI Engineering"
+        roles = ", ".join(ctx.target_roles) if ctx.target_roles else "Software & AI Engineering"
+        skills_summary = ", ".join([s["name"] for s in ctx.skills[:5]]) if ctx.skills else "Core programming & systems fundamentals"
+
+        if intent in (AgentIntent.SKILL_GAP, AgentIntent.CAREER_GUIDANCE):
             return (
-                f"### Career Guidance: {roles}\n\n"
-                "To accelerate your journey toward your target role:\n"
-                "1. **Reinforce Core Prerequisites**: Ensure foundational topics achieve at least 75% mastery.\n"
-                "2. **Address Diagnostic Weaknesses**: Review active misconceptions before attempting advanced projects.\n"
-                "3. **Practical Implementation**: Build end-to-end applications demonstrating distributed systems or AI grounding."
+                f"### Strategic Career & Gap Analysis: {roles}\n\n"
+                f"Based on your current learning profile and career target (**{roles}**):\n\n"
+                f"**Current Assessed Skills:** {skills_summary}\n\n"
+                "**Key Focus Areas & Next Steps:**\n"
+                "1. **Strengthen Core Prerequisites**: Deepen mastery in distributed systems, asynchronous design, and API security to reach senior-level benchmarks (>85%).\n"
+                "2. **Evidence-Driven Projects**: Build production-grade capstones featuring containerized services, caching layers, and high-throughput databases.\n"
+                "3. **Targeted Calibration**: Head to the **Career Twin** or **Skill Gap** dashboard to run a verification assessment on missing competencies."
             )
         elif intent == AgentIntent.STUDY_PLANNING:
-            top_topic = ctx.study_path[0]["concept_name"] if ctx.study_path else "Foundational Concepts"
+            top_topic = ctx.study_path[0]["concept_name"] if ctx.study_path else "Foundational Systems & Algorithms"
             return (
-                "### Recommended Learning Plan for Today\n\n"
-                f"🎯 **Primary Focus**: Review and practice **{top_topic}**\n\n"
-                "1. Read the attached study material overview.\n"
-                "2. Complete an adaptive MCQ assessment to verify retention.\n"
-                "3. Review generated flashcards scheduled via spaced repetition."
+                "### Recommended Learning Action Plan\n\n"
+                f"🎯 **Immediate Focus**: Deepen your mastery in **{top_topic}**\n\n"
+                "1. **Read & Absorb**: Review connected lecture segments or study material.\n"
+                "2. **Active Recall**: Test your intuition with an adaptive assessment.\n"
+                "3. **Practical Implementation**: Implement a minimal working prototype to solidify your mental model."
             )
         else:
             return (
-                f"I have reviewed your inquiry regarding **{query}**.\n\n"
-                "Based on your current curriculum context, review the connected concepts in your Knowledge Graph "
-                "or take a targeted assessment to calibrate your mastery score."
+                f"### Guidance for: {query}\n\n"
+                f"To help you advance toward **{roles}**:\n\n"
+                f"1. **Analyze Your Active Concepts**: You are currently tracking **{skills_summary}**.\n"
+                "2. **Calibrate Readiness**: Take a diagnostic quiz or explore the interactive Knowledge Graph to pinpoint prerequisite dependencies.\n"
+                "3. **Ask the Concept Tutor**: For step-by-step Socratic deep-dives into specific technical algorithms, launch a session with the Concept Tutor."
             )
 
 def Math_round(val: Any) -> int:
