@@ -22,7 +22,6 @@ import {
   Music,
   Video,
   Clock,
-  Youtube,
   Link as LinkIcon
 } from 'lucide-react'
 import { API_BASE_URL } from '../config'
@@ -343,7 +342,7 @@ export default function Materials() {
                 : 'bg-slate-900/60 text-slate-400 hover:text-white'
             }`}
           >
-            <Youtube size={14} />
+            <Video size={14} />
             <span>Learn from YouTube</span>
           </button>
         </div>
@@ -353,7 +352,7 @@ export default function Materials() {
           <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 space-y-4 glow-card">
             <div className="flex items-center space-x-3">
               <div className="p-3 bg-red-500/10 text-red-400 rounded-xl border border-red-500/20">
-                <Youtube size={24} />
+                <Video size={24} />
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white">YouTube Educational Video Mining</h3>

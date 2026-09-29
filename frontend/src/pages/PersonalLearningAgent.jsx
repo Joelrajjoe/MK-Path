@@ -18,7 +18,7 @@ import {
   CheckCircle2,
   RefreshCw,
   Globe,
-  Youtube,
+  Video,
   FileText
 } from 'lucide-react'
 import { API_BASE_URL } from '../config'
@@ -341,7 +341,7 @@ export default function PersonalLearningAgent() {
                               className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-900/80 border border-slate-700/60 text-[10px] text-slate-300"
                             >
                               {c.source_type === 'youtube_source' ? (
-                                <Youtube size={10} className="text-red-400" />
+                                <Video size={10} className="text-red-400" />
                               ) : c.source_type === 'learner_material' ? (
                                 <FileText size={10} className="text-indigo-400" />
                               ) : (
