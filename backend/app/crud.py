@@ -1751,23 +1751,119 @@ async def create_material_chunks(db: DatabaseManager, chunks: List[Dict[str, Any
             inserted.append(serialize_doc(c))
         return inserted
 
-async def get_material_chunks(db: DatabaseManager, material_id: str, clerk_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    query: Dict[str, Any] = {"material_id": str(material_id)}
+async def get_material_chunks(db: DatabaseManager, material_id: Optional[str] = None, clerk_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    query: Dict[str, Any] = {}
+    if material_id:
+        query["material_id"] = str(material_id)
     if clerk_user_id:
         query["clerk_user_id"] = clerk_user_id
 
     if db.is_online:
         col = db.get_collection("material_chunks")
-        cursor = col.find(query).sort("chunk_index", 1)
+        cursor = col.find(query).sort("sequence", 1)
         return serialize_docs(await cursor.to_list(length=500))
     else:
         if "material_chunks" not in _DEMO_DB:
             _DEMO_DB["material_chunks"] = []
         chunks = [
             c for c in _DEMO_DB["material_chunks"] 
-            if str(c.get("material_id")) == str(material_id)
+            if (not material_id or str(c.get("material_id")) == str(material_id))
             and (not clerk_user_id or c.get("clerk_user_id") == clerk_user_id)
         ]
-        chunks.sort(key=lambda x: x.get("chunk_index", 0))
+        chunks.sort(key=lambda x: x.get("sequence", 0))
         return serialize_docs(chunks)
+
+
+# ─── Phase 1: MK-Path 2.0 Personal Learning Agent CRUD ────────────────────────
+
+async def create_agent_conversation(db: DatabaseManager, conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    doc = dict(conversation_data)
+    doc["created_at"] = doc.get("created_at") or datetime.utcnow()
+    doc["updated_at"] = doc.get("updated_at") or datetime.utcnow()
+
+    if db.is_online:
+        col = db.get_collection("agent_conversations")
+        res = await col.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return serialize_doc(doc)
+    else:
+        if "agent_conversations" not in _DEMO_DB:
+            _DEMO_DB["agent_conversations"] = []
+        doc["_id"] = ObjectId()
+        _DEMO_DB["agent_conversations"].append(doc)
+        return serialize_doc(doc)
+
+async def get_agent_conversations(db: DatabaseManager, clerk_user_id: str) -> List[Dict[str, Any]]:
+    if db.is_online:
+        col = db.get_collection("agent_conversations")
+        cursor = col.find({"clerk_user_id": clerk_user_id}).sort("updated_at", -1)
+        return serialize_docs(await cursor.to_list(length=100))
+    else:
+        convs = [c for c in _DEMO_DB.get("agent_conversations", []) if c.get("clerk_user_id") == clerk_user_id]
+        convs.sort(key=lambda x: x.get("updated_at", datetime.min), reverse=True)
+        return serialize_docs(convs)
+
+async def get_agent_conversation(db: DatabaseManager, conversation_id: str, clerk_user_id: str) -> Optional[Dict[str, Any]]:
+    if db.is_online:
+        col = db.get_collection("agent_conversations")
+        try:
+            doc = await col.find_one({"_id": ObjectId(conversation_id), "clerk_user_id": clerk_user_id})
+            return serialize_doc(doc)
+        except Exception:
+            return None
+    else:
+        for c in _DEMO_DB.get("agent_conversations", []):
+            if str(c.get("_id")) == str(conversation_id) and c.get("clerk_user_id") == clerk_user_id:
+                return serialize_doc(c)
+        return None
+
+async def append_agent_conversation_message(
+    db: DatabaseManager,
+    conversation_id: str,
+    clerk_user_id: str,
+    message: Dict[str, Any]
+) -> bool:
+    now = datetime.utcnow()
+    if db.is_online:
+        col = db.get_collection("agent_conversations")
+        try:
+            res = await col.update_one(
+                {"_id": ObjectId(conversation_id), "clerk_user_id": clerk_user_id},
+                {
+                    "$push": {"messages": message},
+                    "$set": {"updated_at": now}
+                }
+            )
+            return res.modified_count > 0
+        except Exception as e:
+            logger.error(f"Failed to append message to agent conversation {conversation_id}: {e}")
+            return False
+    else:
+        for c in _DEMO_DB.get("agent_conversations", []):
+            if str(c.get("_id")) == str(conversation_id) and c.get("clerk_user_id") == clerk_user_id:
+                if "messages" not in c:
+                    c["messages"] = []
+                c["messages"].append(message)
+                c["updated_at"] = now
+                return True
+        return False
+
+async def delete_agent_conversation(db: DatabaseManager, conversation_id: str, clerk_user_id: str) -> bool:
+    if db.is_online:
+        col = db.get_collection("agent_conversations")
+        try:
+            res = await col.delete_one({"_id": ObjectId(conversation_id), "clerk_user_id": clerk_user_id})
+            return res.deleted_count > 0
+        except Exception:
+            return False
+    else:
+        if "agent_conversations" not in _DEMO_DB:
+            return False
+        before_len = len(_DEMO_DB["agent_conversations"])
+        _DEMO_DB["agent_conversations"] = [
+            c for c in _DEMO_DB["agent_conversations"]
+            if not (str(c.get("_id")) == str(conversation_id) and c.get("clerk_user_id") == clerk_user_id)
+        ]
+        return len(_DEMO_DB["agent_conversations"]) < before_len
+
 

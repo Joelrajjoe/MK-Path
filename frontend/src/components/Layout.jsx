@@ -59,6 +59,7 @@ export default function Layout() {
   const getPageTitle = (path) => {
     switch (path) {
       case '/dashboard': return 'Dashboard'
+      case '/agent': return 'AI Learning & Career Agent'
       case '/materials': return 'Study Materials'
       case '/knowledge-graph': return 'Interactive Knowledge Graph'
       case '/podcast': return 'Audio Podcast Studio'
@@ -82,6 +83,7 @@ export default function Layout() {
 
   const primaryNavItems = [
     { to: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
+    { to: '/agent', label: 'AI Agent', icon: <Sparkles size={18} /> },
     { to: '/materials', label: 'Materials', icon: <FileText size={18} /> },
     { to: '/knowledge-graph', label: 'Knowledge Graph', icon: <GitBranch size={18} /> },
     { to: '/podcast', label: 'Audio Podcast', icon: <Radio size={18} /> },

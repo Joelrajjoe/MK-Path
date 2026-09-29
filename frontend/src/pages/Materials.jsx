@@ -21,8 +21,11 @@ import {
   Image,
   Music,
   Video,
-  Clock
+  Clock,
+  Youtube,
+  Link as LinkIcon
 } from 'lucide-react'
+import { API_BASE_URL } from '../config'
 
 export default function Materials() {
   const { getToken } = useAuth()
@@ -258,6 +261,55 @@ export default function Materials() {
     }
   }
 
+  // YouTube Ingestion state
+  const [ingestMode, setIngestMode] = useState('file') // 'file' | 'youtube'
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [manualTranscript, setManualTranscript] = useState('')
+  const [showManualTranscriptInput, setShowManualTranscriptInput] = useState(false)
+  const [youtubeLoading, setYoutubeLoading] = useState(false)
+  const [youtubeError, setYoutubeError] = useState(null)
+  const [youtubeSuccess, setYoutubeSuccess] = useState(null)
+
+  const handleIngestYouTube = async (e) => {
+    e.preventDefault()
+    if (!youtubeUrl.trim()) return
+    try {
+      setYoutubeLoading(true)
+      setYoutubeError(null)
+      setYoutubeSuccess(null)
+      const token = await getToken()
+      const res = await fetch(`${API_BASE_URL}/api/youtube/ingest`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          url: youtubeUrl.trim(),
+          manual_transcript: manualTranscript.trim() || undefined
+        })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'YouTube ingestion failed')
+
+      if (data.status === 'FAILED') {
+        setShowManualTranscriptInput(true)
+        setYoutubeError(data.error || 'No auto-captions found. Please paste transcript below.')
+      } else {
+        setYoutubeSuccess(`YouTube Lecture "${data.title}" processed successfully! (${data.concepts_extracted_count || 0} concepts mined)`)
+        setYoutubeUrl('')
+        setManualTranscript('')
+        setShowManualTranscriptInput(false)
+        await fetchMaterials()
+        await fetchConcepts()
+      }
+    } catch (err) {
+      setYoutubeError(err.message || 'Failed to ingest YouTube video')
+    } finally {
+      setYoutubeLoading(false)
+    }
+  }
+
   // Filter concepts for active material
   const materialConcepts = selectedMaterial 
     ? concepts.filter(c => c.material_id === selectedMaterial._id)
@@ -269,70 +321,160 @@ export default function Materials() {
       {/* Left Pane: Uploader and List */}
       <div className={`flex-1 space-y-8 pr-0 lg:pr-6 transition-all duration-300 ${selectedMaterial ? 'lg:mr-[400px] xl:mr-[480px]' : ''}`}>
         
-        {/* Upload Container */}
-        <div 
-          onDragEnter={handleDrag}
-          onDragOver={handleDrag}
-          onDragLeave={handleDrag}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current.click()}
-          className={`border-2 border-dashed rounded-2xl p-10 text-center space-y-4 cursor-pointer transition duration-300 glow-card ${
-            dragActive 
-              ? 'border-indigo-500 bg-indigo-500/10' 
-              : 'border-slate-800 bg-slate-900/20 hover:bg-slate-900/30 hover:border-slate-700'
-          }`}
-        >
-          <input 
-            ref={fileInputRef}
-            type="file" 
-            accept=".pdf,.txt,.png,.jpg,.jpeg,.bmp,.webp,.mp3,.wav,.m4a,.ogg,.flac,.mp4,.avi,.webm,.mkv,.mov"
-            className="hidden" 
-            onChange={handleFileChange}
-          />
-          
-          <div className="mx-auto w-fit p-4 bg-indigo-500/10 text-indigo-400 rounded-full border border-indigo-500/20">
-            {uploadStatus === 'uploading' || uploadStatus === 'processing' ? (
-              <Loader2 className="h-8 w-8 animate-spin" />
-            ) : (
-              <UploadCloud className="h-8 w-8" />
-            )}
-          </div>
+        {/* Mode Switch Tabs */}
+        <div className="flex items-center space-x-2 border-b border-slate-800 pb-3">
+          <button
+            onClick={() => setIngestMode('file')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+              ingestMode === 'file'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
+                : 'bg-slate-900/60 text-slate-400 hover:text-white'
+            }`}
+          >
+            <UploadCloud size={14} />
+            <span>Upload Document / Media</span>
+          </button>
 
-          <div className="space-y-1.5">
-            {uploadStatus === 'idle' && (
-              <>
-                <p className="font-bold text-white text-sm">Drag & drop your study material here, or click to browse</p>
-                <p className="text-xs text-slate-500">Supports PDF, TXT, Images (PNG/JPG), Audio (MP3/WAV/M4A), Video (MP4/AVI/WEBM) · Max 25MB</p>
-              </>
-            )}
-            {(uploadStatus === 'uploading' || uploadStatus === 'processing') && (
-              <>
-                <p className="font-bold text-indigo-400 text-sm">
-                  {uploadStatus === 'uploading' ? 'Uploading file bytes...' : 'Extracting PDF layout text...'}
-                </p>
-                <div className="w-48 mx-auto bg-slate-800 h-1.5 rounded-full overflow-hidden mt-2">
-                  <div 
-                    className="bg-indigo-500 h-full transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  ></div>
-                </div>
-              </>
-            )}
-            {uploadStatus === 'success' && (
-              <div className="flex flex-col items-center space-y-1 text-emerald-400">
-                <CheckCircle2 size={24} />
-                <p className="font-bold text-sm">PDF Processed and Text Extracted!</p>
-              </div>
-            )}
-            {uploadStatus === 'error' && (
-              <div className="flex flex-col items-center space-y-1 text-rose-400">
-                <AlertTriangle size={24} />
-                <p className="font-bold text-sm">Ingestion Failed</p>
-                <p className="text-xs text-rose-500 max-w-xs">{uploadError}</p>
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => setIngestMode('youtube')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+              ingestMode === 'youtube'
+                ? 'bg-red-600 text-white shadow-md shadow-red-600/20'
+                : 'bg-slate-900/60 text-slate-400 hover:text-white'
+            }`}
+          >
+            <Youtube size={14} />
+            <span>Learn from YouTube</span>
+          </button>
         </div>
+
+        {/* YouTube Ingestion Container */}
+        {ingestMode === 'youtube' ? (
+          <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 space-y-4 glow-card">
+            <div className="flex items-center space-x-3">
+              <div className="p-3 bg-red-500/10 text-red-400 rounded-xl border border-red-500/20">
+                <Youtube size={24} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">YouTube Educational Video Mining</h3>
+                <p className="text-xs text-slate-400">Extract timestamped transcripts, concept graphs, and structured notes directly from YouTube.</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleIngestYouTube} className="space-y-3">
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500/60"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={youtubeLoading || !youtubeUrl.trim()}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs disabled:opacity-50 transition cursor-pointer flex items-center space-x-1.5"
+                >
+                  {youtubeLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                  <span>{youtubeLoading ? 'Processing...' : 'Ingest & Mine'}</span>
+                </button>
+              </div>
+
+              {showManualTranscriptInput && (
+                <div className="space-y-1.5 pt-2">
+                  <label className="text-xs font-semibold text-slate-400">Paste Video Transcript (Fallback):</label>
+                  <textarea
+                    rows={4}
+                    placeholder="Paste full transcript text or lecture notes verbatim..."
+                    value={manualTranscript}
+                    onChange={(e) => setManualTranscript(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-red-500/60 font-mono"
+                  />
+                </div>
+              )}
+
+              {youtubeError && (
+                <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-xs flex items-center space-x-2">
+                  <AlertTriangle size={14} className="shrink-0" />
+                  <span>{youtubeError}</span>
+                </div>
+              )}
+
+              {youtubeSuccess && (
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-xs flex items-center space-x-2">
+                  <CheckCircle2 size={14} className="shrink-0" />
+                  <span>{youtubeSuccess}</span>
+                </div>
+              )}
+            </form>
+          </div>
+        ) : (
+          /* File Upload Container */
+          <div 
+            onDragEnter={handleDrag}
+            onDragOver={handleDrag}
+            onDragLeave={handleDrag}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current.click()}
+            className={`border-2 border-dashed rounded-2xl p-10 text-center space-y-4 cursor-pointer transition duration-300 glow-card ${
+              dragActive 
+                ? 'border-indigo-500 bg-indigo-500/10' 
+                : 'border-slate-800 bg-slate-900/20 hover:bg-slate-900/30 hover:border-slate-700'
+            }`}
+          >
+            <input 
+              ref={fileInputRef}
+              type="file" 
+              accept=".pdf,.txt,.png,.jpg,.jpeg,.bmp,.webp,.mp3,.wav,.m4a,.ogg,.flac,.mp4,.avi,.webm,.mkv,.mov"
+              className="hidden" 
+              onChange={handleFileChange}
+            />
+            
+            <div className="mx-auto w-fit p-4 bg-indigo-500/10 text-indigo-400 rounded-full border border-indigo-500/20">
+              {uploadStatus === 'uploading' || uploadStatus === 'processing' ? (
+                <Loader2 className="h-8 w-8 animate-spin" />
+              ) : (
+                <UploadCloud className="h-8 w-8" />
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              {uploadStatus === 'idle' && (
+                <>
+                  <p className="font-bold text-white text-sm">Drag & drop your study material here, or click to browse</p>
+                  <p className="text-xs text-slate-500">Supports PDF, TXT, Images (PNG/JPG), Audio (MP3/WAV/M4A), Video (MP4/AVI/WEBM) · Max 25MB</p>
+                </>
+              )}
+              {(uploadStatus === 'uploading' || uploadStatus === 'processing') && (
+                <>
+                  <p className="font-bold text-indigo-400 text-sm">
+                    {uploadStatus === 'uploading' ? 'Uploading file bytes...' : 'Extracting PDF layout text...'}
+                  </p>
+                  <div className="w-48 mx-auto bg-slate-800 h-1.5 rounded-full overflow-hidden mt-2">
+                    <div 
+                      className="bg-indigo-500 h-full transition-all duration-300"
+                      style={{ width: `${uploadProgress}%` }}
+                    ></div>
+                  </div>
+                </>
+              )}
+              {uploadStatus === 'success' && (
+                <div className="flex flex-col items-center space-y-1 text-emerald-400">
+                  <CheckCircle2 size={24} />
+                  <p className="font-bold text-sm">Material Processed and Text Extracted!</p>
+                </div>
+              )}
+              {uploadStatus === 'error' && (
+                <div className="flex flex-col items-center space-y-1 text-rose-400">
+                  <AlertTriangle size={24} />
+                  <p className="font-bold text-sm">Ingestion Failed</p>
+                  <p className="text-xs text-rose-500 max-w-xs">{uploadError}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Ingested List Table */}
         <div className="space-y-4">

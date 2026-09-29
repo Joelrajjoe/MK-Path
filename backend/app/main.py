@@ -3931,3 +3931,226 @@ async def get_unified_learner_intelligence(
     }
 
 
+# ─── MK-PATH 2.0: PHASE 1 — PERSONAL AI LEARNING & CAREER AGENT ──────────────
+
+from .agent import (
+    PersonalLearningAgent, AgentChatRequest, AgentChatResponse,
+    AgentConversation, AgentIntent
+)
+
+@app.post("/api/agent/chat", response_model=AgentChatResponse)
+async def agent_chat(
+    req: AgentChatRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Central MK-Path Personal AI Learning & Career Agent chat endpoint.
+    Orchestrates intent routing, unified learner context building, source attribution, and action recommendations.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        response = await PersonalLearningAgent.chat(
+            db=db,
+            clerk_user_id=clerk_id,
+            request=req
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Agent chat execution failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Agent consultation failed: {str(e)}"
+        )
+
+@app.get("/api/agent/conversations")
+async def get_agent_conversations(
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve all AI Agent learning conversations for current user."""
+    clerk_id = current_user["clerk_user_id"]
+    return await crud.get_agent_conversations(db, clerk_id)
+
+@app.get("/api/agent/conversations/{conversation_id}")
+async def get_agent_conversation_detail(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve single AI Agent learning conversation history."""
+    clerk_id = current_user["clerk_user_id"]
+    conv = await crud.get_agent_conversation(db, conversation_id, clerk_id)
+    if not conv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
+    return conv
+
+@app.delete("/api/agent/conversations/{conversation_id}")
+async def delete_agent_conversation(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Delete single AI Agent learning conversation."""
+    clerk_id = current_user["clerk_user_id"]
+    success = await crud.delete_agent_conversation(db, conversation_id, clerk_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found or unauthorized"
+        )
+    return {"status": "success", "message": "Conversation deleted"}
+
+
+# ─── MK-PATH 2.0: PHASE 2 — YOUTUBE LEARNING INTELLIGENCE ─────────────────────
+
+from .services.youtube import (
+    YouTubeProcessor, YouTubeIngestRequest, YouTubeProcessResult
+)
+
+@app.post("/api/youtube/ingest")
+async def ingest_youtube_video(
+    req: YouTubeIngestRequest,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """
+    Ingest YouTube educational video, extract captions with timestamps, chunk, embed, and extract concepts.
+    """
+    clerk_id = current_user["clerk_user_id"]
+    try:
+        result = await YouTubeProcessor.ingest_video(
+            db=db,
+            clerk_user_id=clerk_id,
+            request=req
+        )
+        return result
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"YouTube ingestion failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"YouTube ingestion failed: {str(e)}"
+        )
+
+@app.get("/api/youtube/{material_id}")
+async def get_youtube_details(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve detailed YouTube ingested material, video metadata, and status."""
+    clerk_id = current_user["clerk_user_id"]
+    mat = await crud.get_material(db, material_id, clerk_id)
+    if not mat or mat.get("source_type") != "youtube":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube material not found")
+    return mat
+
+@app.get("/api/youtube/{material_id}/transcript")
+async def get_youtube_transcript_route(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve complete normalized transcript of an ingested YouTube video."""
+    clerk_id = current_user["clerk_user_id"]
+    mat = await crud.get_material(db, material_id, clerk_id)
+    if not mat or mat.get("source_type") != "youtube":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube material not found")
+    return {
+        "material_id": material_id,
+        "title": mat.get("title"),
+        "transcript": mat.get("raw_text", ""),
+        "duration": mat.get("duration")
+    }
+
+@app.get("/api/youtube/{material_id}/segments")
+async def get_youtube_segments_route(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Retrieve timestamped semantic video segments and chunks."""
+    clerk_id = current_user["clerk_user_id"]
+    mat = await crud.get_material(db, material_id, clerk_id)
+    if not mat or mat.get("source_type") != "youtube":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube material not found")
+    
+    chunks = await crud.get_material_chunks(db, material_id=material_id, clerk_user_id=clerk_id)
+    return {
+        "material_id": material_id,
+        "title": mat.get("title"),
+        "segments": mat.get("segments", []),
+        "chunks": chunks
+    }
+
+@app.post("/api/youtube/{material_id}/process")
+async def reprocess_youtube_video(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Re-run concept extraction and RAG indexing on an ingested YouTube video."""
+    clerk_id = current_user["clerk_user_id"]
+    mat = await crud.get_material(db, material_id, clerk_id)
+    if not mat or mat.get("source_type") != "youtube":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube material not found")
+
+    text = mat.get("raw_text", "")
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Material has no transcript to process")
+
+    # Extract concepts
+    extraction = await AIService.extract_concepts_and_relationships(text[:12000])
+    concepts = extraction.get("concepts", [])
+    
+    for c in concepts:
+        concept_model = Concept(
+            clerk_user_id=clerk_id,
+            material_id=material_id,
+            name=c["name"],
+            description=c.get("description", ""),
+            difficulty=c.get("difficulty", "intermediate"),
+            prerequisites=c.get("prerequisites", []),
+            exam_relevance=c.get("exam_relevance", 80),
+            industry_relevance=c.get("industry_relevance", 85)
+        )
+        await crud.create_concept(db, concept_model)
+
+    return {
+        "material_id": material_id,
+        "status": "READY",
+        "concepts_extracted_count": len(concepts),
+        "message": f"Successfully extracted {len(concepts)} concepts from YouTube video."
+    }
+
+@app.get("/api/youtube/{material_id}/notes")
+async def get_youtube_study_notes(
+    material_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    """Generate or retrieve structured high-yield notes from YouTube lecture content."""
+    clerk_id = current_user["clerk_user_id"]
+    mat = await crud.get_material(db, material_id, clerk_id)
+    if not mat or mat.get("source_type") != "youtube":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="YouTube material not found")
+
+    text = mat.get("raw_text", "")
+    notes = await AIService.generate_study_notes(
+        material_title=mat.get("title", "YouTube Lecture"),
+        concepts=[],
+        context_chunks=[text[:6000]]
+    )
+    return {
+        "material_id": material_id,
+        "video_title": mat.get("title"),
+        "notes": notes
+    }
+
+
+

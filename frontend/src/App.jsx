@@ -22,6 +22,7 @@ import Search from './pages/Search'
 import ExportStudio from './pages/ExportStudio'
 import StudyNotes from './pages/StudyNotes'
 import ConceptTutor from './pages/ConceptTutor'
+import PersonalLearningAgent from './pages/PersonalLearningAgent'
 import AudioPodcastStudio from './pages/AudioPodcastStudio'
 import NotFound from './pages/NotFound'
 
@@ -38,6 +39,7 @@ export default function App() {
           {/* Protected Routes Shell */}
           <Route element={<ProtectedRoute />}>
             <Route path="dashboard" element={<Dashboard />} />
+            <Route path="agent" element={<PersonalLearningAgent />} />
             <Route path="materials" element={<Materials />} />
             <Route path="knowledge-graph" element={<KnowledgeGraph />} />
             <Route path="podcast" element={<AudioPodcastStudio />} />
